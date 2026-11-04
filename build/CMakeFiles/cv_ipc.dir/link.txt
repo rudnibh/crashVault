@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcv_ipc.a CMakeFiles/cv_ipc.dir/src/ipc/socket_server.cc.o
+/usr/bin/ranlib libcv_ipc.a

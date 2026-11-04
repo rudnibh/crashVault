@@ -1,0 +1,90 @@
+name: CrashVault CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+
+jobs:
+  # ── Build + unit tests ────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test (RelWithDebInfo)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build python3 \
+            valgrind
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Unit tests
+        run: cd build && ctest -V -R unit_phase1
+
+      - name: Integration tests (Phase 1 watcher)
+        run: cd build && ctest -V -R integration_watcher_phase1
+        timeout-minutes: 2
+
+  # ── ASan + UBSan ──────────────────────────────────────────────────────────
+  sanitize-asan:
+    name: ASan + UBSan
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y build-essential cmake ninja-build python3
+      - name: Configure (ASan)
+        run: cmake -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSANITIZE=asan
+      - name: Build
+        run: cmake --build build-asan
+      - name: Run tests with ASan
+        run: cd build-asan && ctest -V -R unit_phase1
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
+
+  # ── TSan ─────────────────────────────────────────────────────────────────
+  sanitize-tsan:
+    name: TSan (Thread Sanitizer)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y build-essential cmake ninja-build python3
+      - name: Configure (TSan)
+        run: cmake -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSANITIZE=tsan
+      - name: Build
+        run: cmake --build build-tsan
+      - name: Run tests with TSan
+        run: cd build-tsan && ctest -V -R unit_phase1
+        env:
+          TSAN_OPTIONS: second_deadlock_stack=1:abort_on_error=1
+
+  # ── Demo smoke test ───────────────────────────────────────────────────────
+  demo:
+    name: Demo Smoke Test
+    runs-on: ubuntu-22.04
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y build-essential cmake ninja-build
+      - name: Build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build
+      - name: Run demo
+        run: bash scripts/demo.sh
+        timeout-minutes: 2

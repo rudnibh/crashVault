@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcv_pipeline.a CMakeFiles/cv_pipeline.dir/src/pipeline/bounded_queue.cc.o CMakeFiles/cv_pipeline.dir/src/pipeline/worker_pool.cc.o
+/usr/bin/ranlib libcv_pipeline.a

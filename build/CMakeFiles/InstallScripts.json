@@ -1,0 +1,9 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/rudnibh/Projects/crashvault/build/cmake_install.cmake",
+		"/home/rudnibh/Projects/crashvault/build/_deps/doctest-build/cmake_install.cmake",
+		"/home/rudnibh/Projects/crashvault/build/_deps/nlohmann_json-build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

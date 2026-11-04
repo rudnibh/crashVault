@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/rudnibh/Projects/crashvault/build/_deps/doctest-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

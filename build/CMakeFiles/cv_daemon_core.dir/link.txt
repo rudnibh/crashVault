@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcv_daemon_core.a CMakeFiles/cv_daemon_core.dir/src/daemon/config.cc.o CMakeFiles/cv_daemon_core.dir/src/daemon/signal_handler.cc.o CMakeFiles/cv_daemon_core.dir/src/daemon/daemonize.cc.o CMakeFiles/cv_daemon_core.dir/src/daemon/logger.cc.o
+/usr/bin/ranlib libcv_daemon_core.a

@@ -1,0 +1,1 @@
+/usr/bin/c++ -O2 -g -DNDEBUG -pthread -Wl,--dependency-file=CMakeFiles/crashvaultd.dir/link.d CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o -o crashvaultd  libcv_daemon_core.a libcv_watcher.a libcv_pipeline.a libcv_ipc.a libcv_daemon_core.a

@@ -1,0 +1,4 @@
+// doctest — single-header C++ testing framework, v2.4.11
+// https://github.com/doctest/doctest  MIT License
+// Downloaded 2024: full header omitted here for brevity — we fetch the real one at build time.
+// The actual file is fetched by CMake FetchContent or by scripts/fetch_deps.sh
