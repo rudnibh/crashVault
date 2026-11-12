@@ -154,9 +154,9 @@ CMakeFiles/cv_watcher.dir/src/watcher/inotify_watcher.cc.o: \
  /usr/include/c++/16.1.1/atomic \
  /usr/include/c++/16.1.1/bits/atomic_base.h \
  /usr/include/c++/16.1.1/bits/atomic_lockfree_defines.h \
+ /usr/include/sys/inotify.h /usr/include/bits/inotify.h \
  /home/rudnibh/Projects/crashvault/src/watcher/../daemon/config.h \
  /home/rudnibh/Projects/crashvault/src/watcher/../daemon/logger.h \
- /usr/include/sys/inotify.h /usr/include/bits/inotify.h \
  /usr/include/sys/epoll.h /usr/include/sys/ioctl.h \
  /usr/include/bits/ioctls.h /usr/include/asm/ioctls.h \
  /usr/include/asm-generic/ioctls.h /usr/include/linux/ioctl.h \

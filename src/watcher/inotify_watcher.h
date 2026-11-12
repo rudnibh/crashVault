@@ -32,10 +32,10 @@ namespace cv {
 // A settled file event passed from the watcher to the debouncer.
 struct RawEvent {
     enum class Kind { MODIFIED, DELETED, MOVED_FROM, MOVED_TO, OVERFLOW };
-    Kind        kind;
+    Kind        kind{Kind::MODIFIED};
     std::string path;      // absolute path
     std::string dest_path; // only for MOVED_TO (rename destination)
-    uint32_t    cookie;    // inotify rename cookie for pairing MOVED_FROM/TO
+    uint32_t    cookie{0}; // inotify rename cookie for pairing MOVED_FROM/TO
 };
 
 class Config; // forward decl

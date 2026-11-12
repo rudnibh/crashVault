@@ -207,7 +207,7 @@ TEST_CASE("atomic-rename pattern: burst then quiet → single settled event") {
 
 TEST_CASE("delete event propagates correctly") {
     bool got_delete = false;
-    cv::Debouncer deb(50ms, [&](cv::SettledEvent ev) {
+    cv::Debouncer deb(50 /*ms*/, [&](cv::SettledEvent ev) {
         got_delete = ev.deleted;
     });
     deb.start();

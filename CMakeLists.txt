@@ -87,6 +87,21 @@ include_directories(
   ${doctest_SOURCE_DIR}/doctest      # also allows #include "doctest.h"
 )
 
+# SYSTEM includes for third-party headers suppress false-positive warnings
+# (GCC 16 emits -Warray-bounds inside nlohmann/json internals which is a
+# known upstream issue; treating them as system headers silences them).
+include_directories(SYSTEM
+  ${nlohmann_json_SOURCE_DIR}/include
+)
+
+# Copy doctest single-header to vendor/ so tests can use
+# #include "../../vendor/doctest.h" (the original include path)
+configure_file(
+  ${doctest_SOURCE_DIR}/doctest/doctest.h
+  ${CMAKE_SOURCE_DIR}/vendor/doctest.h
+  COPYONLY
+)
+
 # ── Library: daemon core (shared between daemon and tests) ────────────────────
 add_library(cv_daemon_core STATIC
   src/daemon/config.cc
@@ -127,6 +142,11 @@ target_link_libraries(crashvaultd PRIVATE
   cv_ipc
   nlohmann_json::nlohmann_json
 )
+# WHY -Wno-array-bounds: GCC 16 emits a false-positive -Warray-bounds inside
+# nlohmann/json's make_shared path (std::mutex[0] bounds check). This is a
+# known upstream GCC bug and not in our code. We suppress it only for this
+# translation unit to keep all other -Werror checks active.
+target_compile_options(crashvaultd PRIVATE -Wno-array-bounds)
 
 # ── Executable: cvctl (CLI client) ────────────────────────────────────────────
 add_executable(cvctl
