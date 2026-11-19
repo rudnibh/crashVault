@@ -1,2 +1,0 @@
-/usr/bin/ar qc libcv_watcher.a CMakeFiles/cv_watcher.dir/src/watcher/inotify_watcher.cc.o CMakeFiles/cv_watcher.dir/src/watcher/debouncer.cc.o
-/usr/bin/ranlib libcv_watcher.a

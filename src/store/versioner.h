@@ -26,6 +26,7 @@
 #include "chunker.h"
 #include "object_store.h"
 #include "manifest.h"
+#include "wal.h"
 #include "../daemon/config.h"
 
 namespace cv {
@@ -53,7 +54,7 @@ struct VersionResult {
 class Versioner {
 public:
     Versioner(const Config &cfg, ObjectStore &obj_store,
-              ManifestStore &manifest_store);
+              ManifestStore &manifest_store, Wal &wal);
 
     // Process one settled event. Thread-safe (each worker calls this independently).
     VersionResult process(const std::string &path, bool deleted);
@@ -67,9 +68,10 @@ private:
     bool safe_read(const std::string &path, std::vector<uint8_t> &data,
                    StatBuf &st_out, VersionResult &result);
 
-    const Config &cfg_;
-    ObjectStore  &obj_store_;
-    ManifestStore &manifest_store_;
+    const Config    &cfg_;
+    ObjectStore     &obj_store_;
+    ManifestStore   &manifest_store_;
+    Wal             &wal_;
     std::unique_ptr<IChunker> chunker_;
 };
 

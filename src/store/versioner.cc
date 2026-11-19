@@ -23,10 +23,11 @@ using ::stat;
 namespace cv {
 
 Versioner::Versioner(const Config &cfg, ObjectStore &obj_store,
-                     ManifestStore &manifest_store)
+                     ManifestStore &manifest_store, Wal &wal)
     : cfg_(cfg)
     , obj_store_(obj_store)
     , manifest_store_(manifest_store)
+    , wal_(wal)
 {
     FastCDCConfig cdc_cfg;
     chunker_ = std::make_unique<FastCDCChunker>(cdc_cfg);
@@ -138,7 +139,7 @@ VersionResult Versioner::process(const std::string &path, bool deleted) {
         }
     }
 
-    // ── 3. Chunk + store ──────────────────────────────────────────────────────
+    // ── 3. Chunk + store (chunks written before WAL prepare) ─────────────────
     Manifest m;
     m.id        = generate_uuid();
     m.path      = path;
@@ -159,15 +160,34 @@ VersionResult Versioner::process(const std::string &path, bool deleted) {
         }
     });
 
-    // ── 4. Write manifest + history ───────────────────────────────────────────
+    // ── WAL PREPARE: intent recorded; crash here → orphaned chunks (safe, GC'd later)
+    uint64_t wal_seq = wal_.prepare(m.id, path, m.version, m.chunks);
+
+    // ── 4. Write manifest (atomic) ────────────────────────────────────────────
     if (!manifest_store_.write_manifest(m)) {
         LOG_ERROR("Failed to write manifest for: " + path);
         result.status = VersionResult::Status::ERROR;
         return result;
     }
-    if (!manifest_store_.append_version(path, m.id)) {
-        LOG_WARN("Failed to update history for: " + path);
+
+    // ── WAL COMMIT: manifest is durable; crash here → replay re-appends history
+    if (!wal_.commit(wal_seq)) {
+        LOG_WARN("WAL commit failed for seq=" + std::to_string(wal_seq) +
+                 " — leaving entry for replay");
     }
+
+    // ── 5. Update per-path history ────────────────────────────────────────────
+    bool history_ok = manifest_store_.append_version(path, m.id);
+    if (!history_ok) {
+        LOG_WARN("Failed to update history for: " + path +
+                 " — WAL entry left pending for replay");
+    }
+
+    // ── WAL COMPLETE: all durable state written; entry can be GC'd ────────────
+    // WHY only on success: a crash/replay must still see the entry if the
+    // history update failed. Completing prematurely would lose that version
+    // from the user-visible history even though its chunks/manifest exist.
+    if (history_ok) wal_.complete(wal_seq);
 
     result.manifest_id = m.id;
     result.status = VersionResult::Status::OK;

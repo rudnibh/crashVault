@@ -73,13 +73,32 @@ public:
     // List all snapshot ids (sorted by timestamp)
     std::vector<std::string> list_snapshots() const;
 
+    // Delete a manifest / snapshot file (best effort, used by GC)
+    bool delete_manifest(const std::string &id);
+    bool delete_snapshot(const std::string &id);
+
+    // List all manifest ids currently present on disk
+    std::vector<std::string> list_manifest_ids() const;
+
+    // Create a snapshot of the latest version of every tracked file whose
+    // path is under `root` (empty root = all tracked files).
+    bool create_snapshot(const std::string &root, Snapshot &out);
+
     // Per-path version history: path -> [manifest_id, ...] in chronological order
     // Stored in meta/file_history.json (read on startup, written on each new version)
+    // append_version is idempotent: appending an existing manifest_id is a no-op.
     bool append_version(const std::string &path, const std::string &manifest_id);
     std::vector<std::string> get_history(const std::string &path) const;
 
-    // Verify all manifests: every chunk exists and hashes correctly
-    // Returns list of paths with corruption
+    // Replace the history for one path (used by retention / GC)
+    bool set_history(const std::string &path,
+                     const std::vector<std::string> &manifest_ids);
+
+    // List every path that has recorded history (sorted)
+    std::vector<std::string> list_history_paths() const;
+
+    // Verify all manifests: every chunk exists and hashes correctly.
+    // Returns a human-readable list of corruption problems (empty = healthy).
     std::vector<std::string> verify_all(const std::string &objects_root) const;
 
 private:

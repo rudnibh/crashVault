@@ -1,1 +1,0 @@
-/usr/bin/c++ -O2 -g -DNDEBUG -pthread -Wl,--dependency-file=CMakeFiles/cvctl.dir/link.d CMakeFiles/cvctl.dir/src/cli/main.cc.o -o cvctl

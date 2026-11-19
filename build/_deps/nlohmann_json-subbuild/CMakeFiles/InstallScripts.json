@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/rudnibh/Projects/crashvault/build/_deps/nlohmann_json-subbuild/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

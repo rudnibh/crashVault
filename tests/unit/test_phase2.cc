@@ -5,6 +5,8 @@
 #include "../../src/store/object_store.h"
 #include "../../src/store/manifest.h"
 #include "../../src/store/versioner.h"
+#include "../../src/store/wal.h"
+#include "../../src/store/recovery.h"
 #include "../../vendor/sha256.h"
 #include "../../src/daemon/config.h"
 #include "../../src/daemon/logger.h"
@@ -47,6 +49,19 @@ static std::string random_bytes(size_t n) {
     for (size_t i = 0; i < n; i++)
         s[i] = (char)(rng() & 0xFF);
     return s;
+}
+
+static cv::Config make_store_config(const std::string &store_root,
+                                    const std::string &watch_root) {
+    cv::Config cfg;
+    cfg.store_root = store_root;
+    cfg.worker_count = 1;
+    cfg.debounce_ms = 50;
+    cfg.scheduling_policy = "fcfs";
+    cfg.memory_cap_bytes = 64 * 1024 * 1024;
+    cfg.mmap_threshold_bytes = 1024 * 1024;
+    cfg.watched_roots = {watch_root};
+    return cfg;
 }
 
 // ─── SHA-256 known-answer tests ───────────────────────────────────────────────
@@ -379,7 +394,8 @@ TEST_CASE("version a file and restore it") {
 
     cv::ObjectStore   obj(storedir);
     cv::ManifestStore ms(storedir);
-    cv::Versioner     v(cfg, obj, ms);
+    cv::Wal          wal(storedir);
+    cv::Versioner    v(cfg, obj, ms, wal);
 
     // Write a file
     std::string filepath = watchdir + "/hello.txt";
@@ -415,7 +431,8 @@ TEST_CASE("idempotent: same content twice creates only 1 version") {
 
     cv::ObjectStore   obj(storedir);
     cv::ManifestStore ms(storedir);
-    cv::Versioner     v(cfg, obj, ms);
+    cv::Wal          wal(storedir);
+    cv::Versioner    v(cfg, obj, ms, wal);
 
     std::string filepath = watchdir + "/same.txt";
     write_file(filepath, "constant content");
@@ -439,7 +456,8 @@ TEST_CASE("edit creates new version; dedup reduces written chunks") {
 
     cv::ObjectStore   obj(storedir);
     cv::ManifestStore ms(storedir);
-    cv::Versioner     v(cfg, obj, ms);
+    cv::Wal          wal(storedir);
+    cv::Versioner    v(cfg, obj, ms, wal);
 
     // Large file: many chunks
     std::string filepath = watchdir + "/large.bin";
@@ -479,7 +497,8 @@ TEST_CASE("versioning a deleted file returns SKIPPED_DELETED") {
 
     cv::ObjectStore   obj(storedir);
     cv::ManifestStore ms(storedir);
-    cv::Versioner     v(cfg, obj, ms);
+    cv::Wal          wal(storedir);
+    cv::Versioner    v(cfg, obj, ms, wal);
 
     auto result = v.process("/nonexistent/path/file.txt", false);
     // Should be SKIPPED_DELETED (ENOENT during open)
@@ -492,3 +511,347 @@ TEST_CASE("versioning a deleted file returns SKIPPED_DELETED") {
 } // TEST_SUITE Versioner
 
 
+
+// ─── Phase 3: WAL tests ───────────────────────────────────────────────────────
+TEST_SUITE("WAL") {
+
+TEST_CASE("prepare creates a .wal file") {
+    auto tmpdir = make_tmpdir();
+    cv::Wal wal(tmpdir);
+
+    uint64_t seq = wal.prepare("manifest-id-123", "/project/file.cc", 1,
+                                {"sha256_chunk1", "sha256_chunk2"});
+    CHECK(seq >= 0);
+
+    // Check that a .wal file was created
+    std::string wal_dir = tmpdir + "/wal";
+    auto entries = wal.replay();
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].entry.manifest_id == "manifest-id-123");
+    CHECK(entries[0].entry.state == cv::WalEntry::State::PREPARE);
+    CHECK(!entries[0].needs_history_update);
+
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("commit advances state to COMMIT") {
+    auto tmpdir = make_tmpdir();
+    cv::Wal wal(tmpdir);
+
+    uint64_t seq = wal.prepare("mid-456", "/project/main.cc", 2,
+                                {"sha_a", "sha_b"});
+    CHECK(wal.commit(seq));
+
+    auto entries = wal.replay();
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].entry.state == cv::WalEntry::State::COMMIT);
+    CHECK(entries[0].needs_history_update); // COMMIT without COMPLETE needs history
+
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("complete removes entry from replay") {
+    auto tmpdir = make_tmpdir();
+    cv::Wal wal(tmpdir);
+
+    uint64_t seq = wal.prepare("mid-789", "/project/util.cc", 1, {});
+    wal.commit(seq);
+    CHECK(wal.complete(seq));
+
+    // After complete, the entry should not appear in replay()
+    auto entries = wal.replay();
+    CHECK(entries.empty());
+
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("multiple operations tracked independently") {
+    auto tmpdir = make_tmpdir();
+    cv::Wal wal(tmpdir);
+
+    uint64_t s1 = wal.prepare("m1", "/a.cc", 1, {"c1"});
+    uint64_t s2 = wal.prepare("m2", "/b.cc", 1, {"c2"});
+    wal.prepare("m3", "/c.cc", 1, {"c3"});
+
+    wal.commit(s1);
+    wal.complete(s1); // s1 done
+    wal.commit(s2);   // s2 committed but not complete
+
+    auto entries = wal.replay();
+    CHECK(entries.size() == 2); // s2 (COMMIT) and s3 (PREPARE) are pending
+    bool found_s2 = false, found_s3 = false;
+    for (auto &e : entries) {
+        if (e.entry.manifest_id == "m2") { found_s2 = true; CHECK(e.needs_history_update); }
+        if (e.entry.manifest_id == "m3") { found_s3 = true; CHECK(!e.needs_history_update); }
+    }
+    CHECK(found_s2);
+    CHECK(found_s3);
+
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("WAL serialize/deserialize round-trip") {
+    cv::WalEntry e;
+    e.seq         = 42;
+    e.state       = cv::WalEntry::State::COMMIT;
+    e.manifest_id = "test-manifest-uuid";
+    e.file_path   = "/home/user/project/file.cc";
+    e.version     = 7;
+    e.chunk_shas  = {"sha1", "sha2", "sha3"};
+    e.timestamp   = "2026-01-01T00:00:00Z";
+
+    std::string json = e.to_json();
+    cv::WalEntry e2;
+    CHECK(e2.from_json(json));
+    CHECK(e2.seq == 42);
+    CHECK(e2.state == cv::WalEntry::State::COMMIT);
+    CHECK(e2.manifest_id == "test-manifest-uuid");
+    CHECK(e2.chunk_shas == e.chunk_shas);
+}
+
+TEST_CASE("WAL gc removes old done entries") {
+    auto tmpdir = make_tmpdir();
+    cv::Wal wal(tmpdir);
+
+    // Create 10 completed entries
+    for (int i = 0; i < 10; i++) {
+        uint64_t seq = wal.prepare("mid-" + std::to_string(i), "/f" + std::to_string(i), 1, {});
+        wal.commit(seq);
+        wal.complete(seq);
+    }
+
+    // All 10 are completed; replay should return empty
+    CHECK(wal.replay().empty());
+
+    // GC keeping only 3
+    wal.gc(3);
+
+    // Count .wal.done files remaining
+    size_t count = 0;
+    std::string wal_dir = tmpdir + "/wal";
+    for (auto &p : fs::directory_iterator(wal_dir)) {
+        if (p.path().extension() == ".done") count++;
+    }
+    CHECK(count == 3);
+
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("versioner uses WAL: full round-trip with WAL verification") {
+    auto storedir = make_tmpdir();
+    auto watchdir = make_tmpdir();
+    cv::Config cfg;
+    cfg.store_root        = storedir;
+    cfg.worker_count      = 1;
+    cfg.debounce_ms       = 50;
+    cfg.scheduling_policy = "fcfs";
+    cfg.memory_cap_bytes  = 64 * 1024 * 1024;
+    cfg.mmap_threshold_bytes = 1024 * 1024;
+    cfg.watched_roots     = {watchdir};
+    cv::log_init("", cv::LogLevel::ERROR, false);
+
+    cv::ObjectStore   obj(storedir);
+    cv::ManifestStore ms(storedir);
+    cv::Wal           wal(storedir);
+    cv::Versioner     v(cfg, obj, ms, wal);
+
+    std::string filepath = watchdir + "/test.txt";
+    write_file(filepath, "WAL integration test content\n");
+
+    auto result = v.process(filepath, false);
+    CHECK(result.status == cv::VersionResult::Status::OK);
+
+    // After successful versioning, WAL should have no pending entries
+    // (all three phases: prepare, commit, complete were executed)
+    auto pending = wal.replay();
+    CHECK(pending.empty()); // complete was called successfully
+
+    fs::remove_all(storedir);
+    fs::remove_all(watchdir);
+}
+
+} // TEST_SUITE WAL
+
+// ─── Phase 3b: crash recovery ────────────────────────────────────────────────
+TEST_SUITE("Recovery") {
+
+TEST_CASE("COMMIT without COMPLETE re-appends history") {
+    auto tmpdir = make_tmpdir();
+    cv::ManifestStore ms(tmpdir);
+    cv::Wal wal(tmpdir);
+
+    cv::Manifest m;
+    m.id = "committed-manifest";
+    m.path = "/project/a.cc";
+    m.version = 1;
+    m.file_size = 5;
+    m.mtime = 1700000000;
+    m.mode = 0644;
+    m.sha256 = std::string(64, 'a');
+    m.timestamp = 1700000001;
+    REQUIRE(ms.write_manifest(m));
+
+    uint64_t seq = wal.prepare(m.id, m.path, 1, {});
+    REQUIRE(wal.commit(seq));
+
+    auto stats = cv::recover_wal(wal, ms);
+    CHECK(stats.pending == 1);
+    CHECK(stats.repaired == 1);
+    CHECK(stats.discarded == 0);
+    CHECK(stats.failed == 0);
+
+    auto hist = ms.get_history(m.path);
+    REQUIRE(hist.size() == 1);
+    CHECK(hist[0] == m.id);
+    CHECK(wal.replay().empty());
+
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("PREPARE-only entry is discarded safely") {
+    auto tmpdir = make_tmpdir();
+    cv::ManifestStore ms(tmpdir);
+    cv::Wal wal(tmpdir);
+
+    uint64_t seq = wal.prepare("uncommitted", "/project/b.cc", 1, {});
+    REQUIRE(seq > 0);
+
+    auto stats = cv::recover_wal(wal, ms);
+    CHECK(stats.pending == 1);
+    CHECK(stats.discarded == 1);
+    CHECK(stats.repaired == 0);
+
+    CHECK(ms.get_history("/project/b.cc").empty());
+    CHECK(wal.replay().empty());
+
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("replay is idempotent when history already contains manifest") {
+    auto tmpdir = make_tmpdir();
+    cv::ManifestStore ms(tmpdir);
+    cv::Wal wal(tmpdir);
+
+    cv::Manifest m;
+    m.id = "already-in-history";
+    m.path = "/project/c.cc";
+    m.version = 1;
+    m.sha256 = std::string(64, 'c');
+    REQUIRE(ms.write_manifest(m));
+    REQUIRE(ms.append_version(m.path, m.id));
+
+    uint64_t seq = wal.prepare(m.id, m.path, 1, {});
+    REQUIRE(wal.commit(seq));
+
+    auto stats = cv::recover_wal(wal, ms);
+    CHECK(stats.repaired == 1);
+    CHECK(ms.get_history(m.path).size() == 1); // no duplicate
+
+    fs::remove_all(tmpdir);
+}
+
+} // TEST_SUITE Recovery
+
+// ─── Phase 4: snapshots, verification, retention helpers ─────────────────────
+TEST_SUITE("ManifestStore advanced") {
+
+TEST_CASE("create_snapshot captures latest version per file") {
+    auto storedir = make_tmpdir();
+    auto watchdir = make_tmpdir();
+    cv::Config cfg = make_store_config(storedir, watchdir);
+    cv::log_init("", cv::LogLevel::ERROR, false);
+
+    cv::ObjectStore   obj(storedir);
+    cv::ManifestStore ms(storedir);
+    cv::Wal           wal(storedir);
+    cv::Versioner     v(cfg, obj, ms, wal);
+
+    std::string f1 = watchdir + "/one.txt";
+    std::string f2 = watchdir + "/two.txt";
+    write_file(f1, "version one");
+    auto r1 = v.process(f1, false);
+    CHECK(r1.status == cv::VersionResult::Status::OK);
+    write_file(f2, "version two");
+    auto r2 = v.process(f2, false);
+    CHECK(r2.status == cv::VersionResult::Status::OK);
+
+    cv::Snapshot snap;
+    REQUIRE(ms.create_snapshot(watchdir, snap));
+    CHECK(snap.root == watchdir);
+    CHECK(snap.files.size() == 2);
+    CHECK(snap.files[f1] == r1.manifest_id);
+    CHECK(snap.files[f2] == r2.manifest_id);
+    CHECK(ms.list_snapshots().size() == 1);
+
+    fs::remove_all(storedir);
+    fs::remove_all(watchdir);
+}
+
+TEST_CASE("set_history can truncate and delete paths") {
+    auto tmpdir = make_tmpdir();
+    cv::ManifestStore ms(tmpdir);
+
+    REQUIRE(ms.append_version("/a", "m1"));
+    REQUIRE(ms.append_version("/a", "m2"));
+    REQUIRE(ms.append_version("/b", "m3"));
+    REQUIRE(ms.list_history_paths().size() == 2);
+
+    REQUIRE(ms.set_history("/a", {"m2"}));
+    CHECK(ms.get_history("/a") == std::vector<std::string>{"m2"});
+
+    REQUIRE(ms.set_history("/b", {}));
+    CHECK(ms.get_history("/b").empty());
+    CHECK(ms.list_history_paths() == std::vector<std::string>{"/a"});
+
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("verify_all detects a corrupted chunk") {
+    auto tmpdir = make_tmpdir();
+    cv::ObjectStore obj(tmpdir);
+    cv::ManifestStore ms(tmpdir);
+
+    std::string data = "chunk to corrupt";
+    std::string sha = cv::sha256_hex(data);
+    REQUIRE(obj.write_chunk(sha, reinterpret_cast<const uint8_t*>(data.data()),
+                            data.size()));
+
+    cv::Manifest m;
+    m.id = "verify-me";
+    m.path = "/project/corrupt.cc";
+    m.version = 1;
+    m.sha256 = std::string(64, 'd');
+    m.chunks = {sha};
+    REQUIRE(ms.write_manifest(m));
+
+    CHECK(ms.verify_all(obj.objects_root()).empty());
+
+    std::string cpath = obj.chunk_path(sha);
+    REQUIRE(::chmod(cpath.c_str(), 0644) == 0);
+    {
+        std::ofstream f(cpath, std::ios::binary | std::ios::trunc);
+        f << "tampered";
+    }
+    auto problems = ms.verify_all(obj.objects_root());
+    CHECK(!problems.empty());
+    CHECK(problems[0].find("hash mismatch") != std::string::npos);
+
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("delete_manifest removes it from disk") {
+    auto tmpdir = make_tmpdir();
+    cv::ManifestStore ms(tmpdir);
+    cv::Manifest m;
+    m.id = "to-delete";
+    m.path = "/x";
+    m.version = 1;
+    m.sha256 = std::string(64, 'e');
+    REQUIRE(ms.write_manifest(m));
+    CHECK(ms.has_manifest("to-delete"));
+    CHECK(ms.delete_manifest("to-delete"));
+    CHECK(!ms.has_manifest("to-delete"));
+    fs::remove_all(tmpdir);
+}
+
+} // TEST_SUITE ManifestStore advanced

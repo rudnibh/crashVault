@@ -29,6 +29,8 @@
 #include "../store/object_store.h"
 #include "../store/manifest.h"
 #include "../store/versioner.h"
+#include "../store/wal.h"
+#include "../store/recovery.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -265,13 +267,26 @@ int main(int argc, char *argv[]) {
         }
     );
 
-    // Phase 2: Version store — object store + manifest store + versioner
-    // WHY shared_ptr: Versioner is used by worker threads (lambda capture);
-    // shared_ptr keeps it alive past potential early-exit paths.
+    // Phase 2+3: Version store with WAL for crash consistency
     auto obj_store      = std::make_shared<cv::ObjectStore>(g_config.store_root);
     auto manifest_store = std::make_shared<cv::ManifestStore>(g_config.store_root);
-    auto versioner      = std::make_shared<cv::Versioner>(
-                            g_config, *obj_store, *manifest_store);
+    auto wal            = std::make_shared<cv::Wal>(g_config.store_root);
+
+    // Phase 3: WAL replay on startup — recover any incomplete operations
+    {
+        auto stats = cv::recover_wal(*wal, *manifest_store);
+        if (stats.pending > 0) {
+            LOG_WARN("WAL replay: " + std::to_string(stats.pending) +
+                     " incomplete operation(s): " +
+                     std::to_string(stats.repaired) + " repaired, " +
+                     std::to_string(stats.discarded) + " discarded, " +
+                     std::to_string(stats.failed) + " failed");
+        }
+        wal->gc(200); // keep last 200 completed entries
+    }
+
+    auto versioner = std::make_shared<cv::Versioner>(
+                        g_config, *obj_store, *manifest_store, *wal);
 
     // Worker pool — now calls the real versioner
     cv::WorkerPool pool(

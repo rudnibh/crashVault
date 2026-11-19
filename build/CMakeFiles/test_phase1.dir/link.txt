@@ -1,1 +1,0 @@
-/usr/bin/c++ -O2 -g -DNDEBUG -pthread -Wl,--dependency-file=CMakeFiles/test_phase1.dir/link.d CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o -o test_phase1  libcv_daemon_core.a libcv_watcher.a libcv_pipeline.a libcv_daemon_core.a

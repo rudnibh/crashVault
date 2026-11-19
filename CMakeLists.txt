@@ -131,6 +131,8 @@ add_library(cv_store STATIC
   src/store/chunker.cc
   src/store/object_store.cc
   src/store/manifest.cc
+  src/store/wal.cc
+  src/store/recovery.cc
   src/store/versioner.cc
 )
 target_link_libraries(cv_store PUBLIC cv_daemon_core nlohmann_json::nlohmann_json)

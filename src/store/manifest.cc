@@ -209,11 +209,45 @@ bool ManifestStore::append_version(const std::string &path,
         try { history = json::parse(existing); } catch (...) {}
     }
 
-    // Append the new manifest_id
+    // Append the new manifest_id. WHY the idempotency check: WAL replay may
+    // re-append a manifest whose history update already succeeded before the
+    // crash. Duplicate entries would create phantom versions.
     if (!history.contains(path)) history[path] = json::array();
+    for (const auto &existing_id : history[path]) {
+        if (existing_id.get<std::string>() == manifest_id) return true;
+    }
     history[path].push_back(manifest_id);
 
     return write_json_file(history_path_, history.dump(2));
+}
+
+bool ManifestStore::set_history(const std::string &path,
+                                const std::vector<std::string> &manifest_ids) {
+    std::lock_guard<std::mutex> lk(g_history_mutex);
+
+    json history = json::object();
+    std::string existing;
+    if (read_json_file(history_path_, existing)) {
+        try { history = json::parse(existing); } catch (...) {}
+    }
+
+    if (manifest_ids.empty()) history.erase(path);
+    else history[path] = manifest_ids;
+
+    return write_json_file(history_path_, history.dump(2));
+}
+
+std::vector<std::string> ManifestStore::list_history_paths() const {
+    std::lock_guard<std::mutex> lk(g_history_mutex);
+    std::vector<std::string> paths;
+    std::string existing;
+    if (!read_json_file(history_path_, existing)) return paths;
+    try {
+        json h = json::parse(existing);
+        for (auto it = h.begin(); it != h.end(); ++it) paths.push_back(it.key());
+    } catch (...) {}
+    std::sort(paths.begin(), paths.end());
+    return paths;
 }
 
 std::vector<std::string> ManifestStore::get_history(const std::string &path) const {
@@ -228,6 +262,79 @@ std::vector<std::string> ManifestStore::get_history(const std::string &path) con
     return {};
 }
 
+bool ManifestStore::delete_manifest(const std::string &id) {
+    if (id.empty() || id.find('/') != std::string::npos) return false;
+    return unlink((manifests_dir_ + "/" + id + ".json").c_str()) == 0;
+}
+
+bool ManifestStore::delete_snapshot(const std::string &id) {
+    if (id.empty() || id.find('/') != std::string::npos) return false;
+    return unlink((snapshots_dir_ + "/" + id + ".json").c_str()) == 0;
+}
+
+std::vector<std::string> ManifestStore::list_manifest_ids() const {
+    std::vector<std::string> ids;
+    DIR *dir = opendir(manifests_dir_.c_str());
+    if (!dir) return ids;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        std::string name = ent->d_name;
+        if (name.size() < 5 || name.substr(name.size()-5) != ".json") continue;
+        ids.push_back(name.substr(0, name.size()-5));
+    }
+    closedir(dir);
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+bool ManifestStore::create_snapshot(const std::string &root, Snapshot &out) {
+    out.id        = generate_uuid();
+    out.root      = root;
+    out.timestamp = time(nullptr);
+    out.files.clear();
+
+    const std::string prefix = root.empty() ? "" :
+        (root.back() == '/' ? root : root + "/");
+
+    for (const auto &path : list_history_paths()) {
+        if (!prefix.empty() && path.rfind(prefix, 0) != 0) continue;
+        auto hist = get_history(path);
+        if (hist.empty()) continue;
+        // Use the newest manifest that still exists on disk.
+        for (auto it = hist.rbegin(); it != hist.rend(); ++it) {
+            if (has_manifest(*it)) {
+                out.files[path] = *it;
+                break;
+            }
+        }
+    }
+
+    return write_snapshot(out);
+}
+
+// Verify one content-addressed file: open, read, re-hash, compare.
+static bool verify_file_hash(const std::string &path,
+                             const std::string &expected_sha,
+                             std::string &error) {
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) { error = "missing"; return false; }
+
+    struct stat st{};
+    if (fstat(fd, &st) != 0) { close(fd); error = "stat failed"; return false; }
+
+    std::vector<uint8_t> data(static_cast<size_t>(st.st_size));
+    ssize_t n = data.empty() ? 0 : read(fd, data.data(), data.size());
+    close(fd);
+    if (n < 0 || static_cast<size_t>(n) != data.size()) {
+        error = "short read"; return false;
+    }
+
+    std::string actual = sha256_hex(data.data(), data.size());
+    if (actual != expected_sha) { error = "hash mismatch"; return false; }
+    return true;
+}
+
 std::vector<std::string> ManifestStore::verify_all(
         const std::string &objects_root) const {
     std::vector<std::string> corrupt;
@@ -240,17 +347,35 @@ std::vector<std::string> ManifestStore::verify_all(
         if (name.size() < 5 || name.substr(name.size()-5) != ".json") continue;
         std::string id = name.substr(0, name.size()-5);
         Manifest m;
-        if (!read_manifest(id, m)) { corrupt.push_back(id); continue; }
+        if (!read_manifest(id, m)) {
+            corrupt.push_back("corrupt manifest JSON: " + id);
+            continue;
+        }
 
         for (auto &ch : m.chunks) {
+            if (ch.size() != 64) {
+                corrupt.push_back(m.path + " (malformed chunk id)");
+                continue;
+            }
             std::string chunk_path = objects_root + "/" +
                                      ch.substr(0,2) + "/" + ch.substr(2);
-            if (access(chunk_path.c_str(), F_OK) != 0) {
-                corrupt.push_back(m.path + " (missing chunk " + ch.substr(0,16) + "...)");
+            std::string error;
+            if (!verify_file_hash(chunk_path, ch, error)) {
+                corrupt.push_back(m.path + " (chunk " + ch.substr(0,16) +
+                                  "...: " + error + ")");
             }
         }
     }
     closedir(dir);
+
+    // A history entry pointing at a missing manifest is also corruption.
+    for (const auto &path : list_history_paths()) {
+        for (const auto &id : get_history(path)) {
+            if (!has_manifest(id))
+                corrupt.push_back(path + " (history references missing manifest " +
+                                  id + ")");
+        }
+    }
     return corrupt;
 }
 
