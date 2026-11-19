@@ -36,11 +36,28 @@ RecoveryStats recover_wal(Wal &wal, ManifestStore &manifests) {
                 continue; // leave COMMIT entry pending
             }
         } else {
-            // PREPARE-only: no manifest was committed. Chunks may exist but are
-            // content-addressed and harmless; GC reclaims them later.
-            LOG_INFO("WAL replay: discarding incomplete PREPARE seq=" +
-                     std::to_string(re.entry.seq));
-            stats.discarded++;
+            // PREPARE-only. If the manifest is already on disk, the crash
+            // happened after write_manifest() but before WAL COMMIT. The data
+            // is durable, so finish the operation instead of losing a version.
+            if (manifests.has_manifest(re.entry.manifest_id)) {
+                if (manifests.append_version(re.entry.file_path,
+                                             re.entry.manifest_id)) {
+                    LOG_INFO("WAL replay: completed PREPARE with durable manifest for " +
+                             re.entry.file_path);
+                    stats.repaired++;
+                } else {
+                    LOG_ERROR("WAL replay: history update failed for " +
+                              re.entry.file_path + " — will retry next restart");
+                    stats.failed++;
+                    continue;
+                }
+            } else {
+                // No manifest: chunks may exist but are content-addressed and
+                // harmless; GC reclaims them later.
+                LOG_INFO("WAL replay: discarding incomplete PREPARE seq=" +
+                         std::to_string(re.entry.seq));
+                stats.discarded++;
+            }
         }
 
         wal.complete(re.entry.seq);

@@ -30,6 +30,8 @@
 #include <algorithm>
 #include <chrono>
 #include <sstream>
+#include <filesystem>
+#include <system_error>
 
 namespace cv {
 
@@ -210,10 +212,39 @@ void InotifyWatcher::handle_overflow() {
     LOG_WARN("inotify queue overflow — triggering full rescan");
     overflow_.store(true);
 
-    // Emit a synthetic OVERFLOW event so the debouncer can trigger a rescan
+    // Emit a synthetic OVERFLOW event for observers/logging.
     RawEvent ev;
     ev.kind = RawEvent::Kind::OVERFLOW;
     callback_(std::move(ev));
+
+    // Re-establish watches (new directories may have appeared) and emit a
+    // MODIFIED event for every regular file so the debouncer/pipeline sees the
+    // current state. Content-based idempotency in Versioner means unchanged
+    // files cost one read but produce no new version.
+    namespace fs = std::filesystem;
+    for (const auto &root : roots_) {
+        add_watches_recursive(root);
+
+        std::error_code ec;
+        fs::recursive_directory_iterator it(
+            root, fs::directory_options::skip_permission_denied, ec);
+        const fs::recursive_directory_iterator end;
+        while (!ec && it != end) {
+            const auto &path = it->path();
+            std::error_code file_ec;
+            if (it->is_regular_file(file_ec) &&
+                !is_ignored(path.string())) {
+                RawEvent re;
+                re.kind = RawEvent::Kind::MODIFIED;
+                re.path = path.string();
+                callback_(std::move(re));
+            }
+            it.increment(ec);
+        }
+        if (ec) {
+            LOG_WARN("overflow rescan of " + root + " stopped: " + ec.message());
+        }
+    }
 }
 
 void InotifyWatcher::handle_inotify_event(const ::inotify_event *ev) {

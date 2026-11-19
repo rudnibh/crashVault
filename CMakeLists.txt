@@ -46,7 +46,10 @@ endif()
 # in Release builds to have zero overhead in production.
 if(CMAKE_BUILD_TYPE MATCHES "Debug|RelWithDebInfo")
   add_compile_definitions(CV_FAILPOINTS_ENABLED=1)
+  set(CV_FAILPOINTS_ENABLED ON)
   message(STATUS "Failpoints ENABLED (debug build)")
+else()
+  set(CV_FAILPOINTS_ENABLED OFF)
 endif()
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
@@ -121,6 +124,7 @@ target_link_libraries(cv_watcher PUBLIC cv_daemon_core)
 # ── Library: pipeline ─────────────────────────────────────────────────────────
 add_library(cv_pipeline STATIC
   src/pipeline/bounded_queue.cc
+  src/pipeline/buffer_pool.cc
   src/pipeline/worker_pool.cc
 )
 target_link_libraries(cv_pipeline PUBLIC cv_daemon_core)
@@ -133,9 +137,14 @@ add_library(cv_store STATIC
   src/store/manifest.cc
   src/store/wal.cc
   src/store/recovery.cc
+  src/store/gc.cc
   src/store/versioner.cc
 )
-target_link_libraries(cv_store PUBLIC cv_daemon_core nlohmann_json::nlohmann_json)
+target_link_libraries(cv_store PUBLIC
+  cv_daemon_core
+  cv_pipeline
+  nlohmann_json::nlohmann_json
+)
 # Suppress GCC 16 false-positive array-bounds in nlohmann/json headers
 target_compile_options(cv_store PRIVATE -Wno-array-bounds)
 
@@ -170,6 +179,20 @@ add_executable(cvctl
 target_link_libraries(cvctl PRIVATE
   nlohmann_json::nlohmann_json
 )
+
+# ── Benchmark / evaluation tool ──────────────────────────────────────────────
+add_executable(bench_store
+  bench/bench_store.cc
+)
+target_link_libraries(bench_store PRIVATE cv_store cv_daemon_core)
+target_compile_options(bench_store PRIVATE -Wno-array-bounds)
+
+# ── Executable: web_gateway (HTTP dashboard) ──────────────────────────────────
+add_executable(web_gateway
+  src/web/gateway.cc
+)
+target_link_libraries(web_gateway PRIVATE nlohmann_json::nlohmann_json)
+target_compile_options(web_gateway PRIVATE -Wno-array-bounds)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 enable_testing()
@@ -209,12 +232,61 @@ if(PYTHON3)
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
   )
   set_tests_properties(integration_watcher_phase1 PROPERTIES TIMEOUT 60)
+
+  add_test(
+    NAME integration_daemon_phase5
+    COMMAND ${PYTHON3}
+      ${CMAKE_SOURCE_DIR}/tests/integration/test_daemon_phase5.py
+      $<TARGET_FILE:crashvaultd>
+      $<TARGET_FILE:cvctl>
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+  )
+  set_tests_properties(integration_daemon_phase5 PROPERTIES TIMEOUT 90)
+
+  add_test(
+    NAME integration_crash_recovery
+    COMMAND ${PYTHON3}
+      ${CMAKE_SOURCE_DIR}/tests/integration/test_crash_recovery.py
+      $<TARGET_FILE:crashvaultd>
+      $<TARGET_FILE:cvctl>
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+  )
+  set_tests_properties(integration_crash_recovery PROPERTIES TIMEOUT 60)
+
+  add_test(
+    NAME integration_web_gateway
+    COMMAND ${PYTHON3}
+      ${CMAKE_SOURCE_DIR}/tests/integration/test_web_gateway.py
+      $<TARGET_FILE:crashvaultd>
+      $<TARGET_FILE:web_gateway>
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+  )
+  set_tests_properties(integration_web_gateway PROPERTIES TIMEOUT 60)
+endif()
+
+# End-to-end demos (bash scripts) are also ctest targets.
+find_program(BASH_PROGRAM bash)
+if(BASH_PROGRAM)
+  add_test(
+    NAME demo_end_to_end
+    COMMAND ${BASH_PROGRAM} ${CMAKE_SOURCE_DIR}/scripts/demo.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+  set_tests_properties(demo_end_to_end PROPERTIES TIMEOUT 120)
+
+  add_test(
+    NAME crash_demo
+    COMMAND ${BASH_PROGRAM} ${CMAKE_SOURCE_DIR}/scripts/crash_demo.sh 9
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+  set_tests_properties(crash_demo PROPERTIES TIMEOUT 120)
 endif()
 
 # ── Install ───────────────────────────────────────────────────────────────────
-install(TARGETS crashvaultd cvctl RUNTIME DESTINATION bin)
+install(TARGETS crashvaultd cvctl web_gateway RUNTIME DESTINATION bin)
 install(FILES
   ${CMAKE_SOURCE_DIR}/scripts/demo.sh
+  ${CMAKE_SOURCE_DIR}/scripts/crash_demo.sh
   DESTINATION share/crashvault
   PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
 )

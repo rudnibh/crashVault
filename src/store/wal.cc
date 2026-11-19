@@ -19,9 +19,10 @@
 // At B/C, the WAL entry is PREPARE-only. Chunks may exist in the object store,
 // but since they are content-addressed, they are valid data — we just don't
 // have a manifest referencing them yet. The orphaned chunks are reclaimed by
-// GC (Phase 6). We discard the WAL entry.
+// GC. We discard the WAL entry.
 #include "wal.h"
 #include "../daemon/logger.h"
+#include "../daemon/failpoint.h"
 #include <nlohmann/json.hpp>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -184,7 +185,9 @@ uint64_t Wal::prepare(const std::string &manifest_id, const std::string &file_pa
 
     if (!write_entry(e)) {
         LOG_ERROR("WAL prepare failed for seq=" + std::to_string(seq));
+        return 0;
     }
+    CV_FAILPOINT("wal_after_prepare");
     return seq;
 }
 
@@ -204,6 +207,7 @@ bool Wal::commit(uint64_t seq) {
         LOG_ERROR("WAL commit: write failed seq=" + std::to_string(seq));
         return false;
     }
+    CV_FAILPOINT("wal_after_commit");
     return true;
 }
 
@@ -225,6 +229,7 @@ bool Wal::complete(uint64_t seq) {
     // Remove the old .wal file (best-effort — we won't retry if this fails,
     // since the .wal.done file is the authoritative completed record)
     unlink(wal_path(seq, false).c_str());
+    CV_FAILPOINT("wal_after_complete");
     return true;
 }
 

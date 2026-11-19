@@ -18,14 +18,16 @@ CrashVault is a Linux daemon that continuously versions files in watched directo
 | Producer-consumer queue | `src/pipeline/bounded_queue.cc` | `BoundedQueue::push/pop` | `cvctl status` → see queue_depth; write many files rapidly |
 | Mutex + 2 condvars | `src/pipeline/bounded_queue.cc` | `not_full_`, `not_empty_` | Use TSan build — zero races |
 | nice/setpriority | `src/pipeline/worker_pool.cc` | `WorkerPool::worker_main` | `ps -o pid,ni -p $(pgrep crashvaultd)` |
-| flock(LOCK_SH\|LOCK_NB) | `src/pipeline/worker.cc` | `safe_read_file` | Write while holding exclusive lock; check "skipped-unstable" in log |
-| mmap | `src/store/chunker.cc` | `MmapChunker::open` | Chunk a file >1 MiB; check `/proc/<pid>/maps` for the mapping |
-| WAL (write-ahead log) | `src/store/wal.cc` | `WAL::append` | Kill -9 mid-write; restart; run `cvctl verify` |
-| fsync | `src/store/object_store.cc` | `write_object` | Power-off test; chunk survives reboot |
-| Atomic rename | `src/store/object_store.cc` | `write_object` | `strace -e rename ./crashvaultd --foreground` |
+| flock(LOCK_SH\|LOCK_NB) | `src/store/versioner.cc` | `Versioner::safe_read` | Write while holding exclusive lock; check "skipped-unstable" in log |
+| mmap | `src/store/chunker.cc` | `IChunker::chunk_file` | Unit test chunks a >1 MiB file through the mmap path |
+| WAL (write-ahead log) | `src/store/wal.cc`, `recovery.cc` | `Wal::prepare/commit/complete`, `recover_wal` | `CV_FAILPOINT=wal_after_commit`; restart; `cvctl verify` |
+| fsync | `src/store/object_store.cc` | `ObjectStore::write_chunk` | `strace -e fsync,rename ./crashvaultd --foreground` |
+| Atomic rename | `src/store/object_store.cc` | `ObjectStore::write_chunk` | `strace -e rename ./crashvaultd --foreground` |
 | IPC (Unix socket) | `src/ipc/socket_server.cc` | `SocketServer::serve_loop` | `socat - UNIX-CONNECT:~/.crashvault/crashvaultd.sock` |
 | Scheduling policy | `src/pipeline/bounded_queue.cc` | `BoundedQueue::set_policy` | `cvctl set-policy priority`; watch latency change |
-| GC | `src/store/gc.cc` | `GarbageCollector::run` | `cvctl gc`; storage usage drops |
+| Snapshots | `src/store/manifest.cc` | `ManifestStore::create_snapshot` | `cvctl snapshot-now`; `cvctl snapshots` |
+| GC / retention | `src/store/gc.cc` | `run_gc` | `cvctl gc`; storage usage drops |
+| HTTP gateway | `src/web/gateway.cc` | `handle_client` | `./build/web_gateway`, open `http://127.0.0.1:8080` |
 
 ---
 
@@ -55,43 +57,58 @@ Worker threads call `queue.pop()`, which acquires Lock 1. They never acquire Loc
 
 ## 4. WAL Record Format
 
+The implementation uses **one JSON file per operation** rather than a single
+append-only log. Each file is written with temp + fsync + atomic rename, which
+makes every state transition atomic and removes the need for torn-record/CRC
+handling.
+
 ```
-┌──────────┬────────┬────────┬──────────────┬──────────┐
-│ length   │  type  │  txid  │   payload    │  CRC32   │
-│ (4 bytes)│(1 byte)│(8 bytes│ (length-13 B)│ (4 bytes)│
-└──────────┴────────┴────────┴──────────────┴──────────┘
+wal/00000000000000000042.wal       ← PREPARE or COMMIT (incomplete)
+wal/00000000000000000042.wal.done  ← COMPLETE (authoritative, GC-able)
 ```
 
-**Types:**
-- `0x01` BEGIN
-- `0x02` OP_ADD_MANIFEST
-- `0x03` OP_ADD_SNAPSHOT
-- `0x04` OP_DELETE_VERSION
-- `0x05` OP_GC_SWEEP
-- `0x06` COMMIT
-- `0x07` CHECKPOINT
+```json
+{
+  "seq": 42,
+  "state": "PREPARE | COMMIT | COMPLETE",
+  "manifest_id": "uuid",
+  "file_path": "/abs/path",
+  "version": 3,
+  "chunk_shas": ["...", "..."],
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+```
 
-**Recovery algorithm:**
-1. Scan records from last checkpoint position.
-2. For each record: verify CRC32. On mismatch, truncate from that position (torn write).
-3. Collect complete transactions (BEGIN...COMMIT pairs).
-4. Redo committed transactions idempotently (re-applying a completed write is a no-op because we check for existing objects before writing).
-5. Roll back incomplete transactions (remove any objects written without a COMMIT).
+**Why per-operation files:** a single append log needs truncation, rotation and
+torn-tail detection. With one file per operation, advancing state is just an
+atomic rename, and completed entries can be garbage-collected independently
+(`Wal::gc` keeps the last 200).
+
+**Recovery algorithm (`recover_wal`):**
+
+1. Read every `.wal` file (`.wal.done` files are complete).
+2. PREPARE and no manifest on disk → discard; any chunks are unreferenced and GC reclaims them.
+3. PREPARE and manifest exists → crash happened after the manifest rename but before COMMIT; append history and complete.
+4. COMMIT → re-append history (idempotent) and complete.
+5. Leave entries pending if the history write fails, so the next restart retries.
 
 **Crash-consistency argument:**
 
 | Step | Ordering guarantee | Effect of crash |
 |---|---|---|
-| 1. Write chunk to temp file | No guarantee | Temp file garbage-collected on restart |
+| 1. Write chunk to temp file | No guarantee | Temp file ignored/GC'd |
 | 2. fsync(temp_fd) | Data in stable storage | Chunk survives |
 | 3. rename(temp, objects/ab/cdef) | Atomic on same filesystem | Chunk either fully present or absent |
 | 4. fsync(dir_fd) | Directory entry durable | Chunk visible after reboot |
-| 5. WAL: BEGIN + OP | Log durable | Can redo or ignore |
-| 6. fsync(wal_fd) | WAL record durable | Recovery knows to redo |
-| 7. WAL: COMMIT | Commit durable | Transaction committed |
-| 8. Update in-memory index | No I/O | Re-built from WAL on restart |
+| 5. WAL PREPARE | Intent durable | Recovery knows an operation was in flight |
+| 6. write manifest (temp+fsync+rename) | Manifest atomic | Either old or new manifest |
+| 7. WAL COMMIT | Commit durable | Operation must survive |
+| 8. append history (mutex + atomic write) | History durable | Replay can redo it idempotently |
+| 9. WAL COMPLETE | No further recovery needed | Entry may be GC'd |
 
-A crash between steps 3 and 7 leaves a dangling chunk. This is safe: the chunk is unreferenced and will be collected by GC. No committed version is ever lost.
+A crash before step 6 leaves an uncommitted operation with only harmless
+orphaned chunks. A crash after step 6 is repaired on the next startup by
+replaying the WAL. **No committed version is ever lost.**
 
 ---
 
@@ -105,12 +122,12 @@ A crash between steps 3 and 7 leaves a dangling chunk. This is safe: the chunk i
 ├── config.ini
 │
 ├── wal/
-│   ├── wal.log           # Append-only WAL
-│   └── wal.checkpoint    # 8-byte LSN of last checkpoint
+│   ├── <seq>.wal         # Incomplete operation (PREPARE or COMMIT)
+│   └── <seq>.wal.done    # Completed operation (GC keeps last 200)
 │
 ├── objects/
 │   └── ab/               # First 2 hex chars of SHA-256
-│       └── cdef...       # Remaining 62 hex chars = chunk data
+│       └── cdef...       # Remaining 62 hex chars = chunk data (mode 0444)
 │
 ├── manifests/
 │   └── <uuid>.json       # { "path": ..., "chunks": [...], "sha256": ..., "version": N }
@@ -172,6 +189,8 @@ A crash between steps 3 and 7 leaves a dangling chunk. This is safe: the chunk i
 
 **Logging (logger.cc):** Uses `write(2)` with `O_APPEND`. Linux guarantees atomicity of writes ≤ `PIPE_BUF` (4096 bytes) with `O_APPEND`. All log lines are ≤ 512 bytes. **No race possible for short messages.**
 
+**BufferPool:** `used_` is protected by `mu_`; waiters block on `cv_` with predicates, and every lease releases exactly once via RAII. `in_use()`/`available()` take the same lock. **No data race.**
+
 **Global atomics:** `g_shutdown_requested`, `g_reload_requested` are `std::atomic<bool>`. All accesses use correct memory order. **No race.**
 
 ### Starvation prevention (Priority policy)
@@ -182,15 +201,55 @@ Large files get low priority (high priority number). Without aging, small files 
 
 ## 9. Memory Management
 
-**Buffer pool:** Fixed-size blocks (default 1 MiB) pre-allocated up to `memory_cap_bytes`. Workers request a block, process a chunk, return the block. If no block is available, the worker sleeps until one is returned. This bounds total memory regardless of file sizes.
+**Read budget (`BufferPool`):** a byte-counting semaphore, not a fixed-block
+pool. `Versioner::safe_read` acquires a lease for the file size before
+allocating its buffer and holds it through hash + chunk + manifest. Workers
+block when the budget (`memory_cap_mb`, default 256 MiB) is exhausted, so N
+concurrent workers cannot multiply peak memory. A file larger than the whole
+budget is allowed to run alone (its lease reserves the full budget), which
+avoids deadlock while still serialising oversized readers.
 
-**mmap:** Files larger than `mmap_threshold_bytes` are mapped with `mmap(PROT_READ, MAP_PRIVATE)`. The kernel pages in data on demand; we never hold the entire file in memory at once.
-
-**LRU chunk hash cache:** Recently seen chunk SHA-256s are cached in an LRU to avoid re-hashing chunks we've already stored. Cache size is bounded at construction.
+**mmap:** `IChunker::chunk_file` maps files at or above
+`mmap_threshold_bytes` with `mmap(PROT_READ, MAP_PRIVATE)` and chunks directly
+from the mapping. The production `Versioner` path intentionally uses
+`flock` + `read` + before/after `stat` instead: a non-cooperating writer that
+truncates a mapped file can deliver `SIGBUS`, whereas the read path can detect
+the size/mtime change and retry. The mmap path is exercised by the chunker unit
+tests and is available to zero-copy callers.
 
 ---
 
-## 10. Comparison to Related Systems
+## 10. Snapshots, Retention and GC
+
+**Snapshots** record the newest valid manifest for every tracked file under a
+root (`ManifestStore::create_snapshot`). They are created:
+
+- automatically after `snapshot_quiescence_s` seconds without events, or
+- on demand with `cvctl snapshot-now [root]`.
+
+Restoring a snapshot (`cvctl restore-snapshot <id> [dir]`) either overwrites the
+original paths or writes an isolated copy under `dir`, preserving the path
+relative to the snapshot root.
+
+**Retention / GC** (`run_gc`) applies two rules:
+
+1. Per-file history is trimmed to `retention_versions` (newest kept).
+2. Snapshots older than `retention_days` are removed.
+
+Then it computes which manifests are still referenced by surviving history or
+snapshots, deletes unreferenced manifests, and finally sweeps object-store
+chunks not referenced by any surviving manifest. Content-addressed orphans from
+interrupted writes are reclaimed here, which is safe because no manifest points
+at them.
+
+## 11. Web Gateway
+
+`web_gateway` is a separate loopback-only HTTP process. It serves a
+self-contained dashboard and forwards `/api/*` requests to the daemon over the
+same Unix-socket JSON protocol used by `cvctl`. It holds no state of its own,
+so the daemon remains the single source of truth.
+
+## 12. Comparison to Related Systems
 
 | Feature | CrashVault | Git | ext4 journaling | ZFS snapshots |
 |---|---|---|---|---|

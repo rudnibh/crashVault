@@ -11,8 +11,8 @@ CrashVault demonstrates core Operating Systems concepts through a real, working 
 | Filesystem monitoring | inotify + epoll | `src/watcher/inotify_watcher.cc` |
 | Daemons and signals | double-fork, self-pipe trick | `src/daemon/daemonize.cc`, `signal_handler.cc` |
 | Producer-consumer | Bounded queue, 2 condvars | `src/pipeline/bounded_queue.cc` |
-| File locking | flock(LOCK_SH\|LOCK_NB) | `src/pipeline/worker_pool.cc` |
-| Bounded memory | Buffer pool, LRU cache | `src/pipeline/buffer_pool.cc` |
+| File locking | flock(LOCK_SH\|LOCK_NB) | `src/store/versioner.cc` (`safe_read`) |
+| Bounded memory | Byte-budget read leases | `src/pipeline/buffer_pool.cc` |
 | IPC | Unix domain socket, JSON | `src/ipc/socket_server.cc` |
 | Scheduling | nice/setpriority, FCFS/Priority | `src/pipeline/worker_pool.cc` |
 | WAL + crash consistency | WAL + fsync + atomic rename | `src/store/wal.cc`, `object_store.cc` |
@@ -28,11 +28,28 @@ cd crashvault
 cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j$(nproc)
 
-# Run the demo (starts daemon, writes files, checks events, shuts down)
+# Run the full demo (versioning, snapshots, restore, verify, GC, crash recovery)
 ./scripts/demo.sh
 
-# Or run unit tests
-cd build && ctest -V
+# Repeated crash consistency check (default 10 runs, use 100 for stress)
+./scripts/crash_demo.sh 100
+
+# Run the complete test suite (unit + integration + demos)
+cd build && ctest --output-on-failure
+```
+
+### Web dashboard
+
+```bash
+./build/crashvaultd --foreground &
+./build/web_gateway --socket ~/.crashvault/crashvaultd.sock --port 8080
+# Open http://127.0.0.1:8080
+```
+
+### Benchmark
+
+```bash
+./build/bench_store    # FastCDC vs fixed-size + end-to-end dedup ratio
 ```
 
 ## Running the Daemon
@@ -70,20 +87,28 @@ days = 30
 ## Command Reference (cvctl)
 
 ```bash
-cvctl status               # Show daemon status
-cvctl ping                 # Check daemon is alive
-cvctl set-policy priority  # Switch scheduling policy at runtime
-cvctl shutdown             # Gracefully stop daemon
+cvctl status                       # Show daemon status and counters
+cvctl ping                         # Check daemon is alive
+cvctl set-policy priority          # Switch scheduling policy at runtime
+cvctl reload                       # Reload config (same as SIGHUP)
+cvctl shutdown                     # Gracefully stop daemon
 
-# Phase 5+ commands:
-cvctl list                 # List watched files
-cvctl history <path>       # Show version history for a file
-cvctl snapshots            # List project snapshots
-cvctl snapshot-now         # Trigger immediate snapshot
-cvctl restore <path>       # Restore file to last version
-cvctl gc                   # Run garbage collection
-cvctl simulate-crash       # Run crash simulator demo
+cvctl list [root]                   # List tracked files
+cvctl history <path>                # Show versions (newest first)
+cvctl snapshots                     # List project snapshots
+cvctl snapshot-now [root]           # Trigger an immediate snapshot
+cvctl restore <path> [version]      # Restore newest or a 1-based version
+cvctl restore <path> --dest <file>  # Restore somewhere else
+cvctl restore <path> --manifest ID  # Restore an exact manifest
+cvctl restore-snapshot <id> [dir]   # Restore a whole snapshot ('latest' works)
+cvctl verify                        # Re-hash every chunk and check history
+cvctl gc                            # Apply retention and reclaim disk space
+cvctl simulate-crash                # Crash after the next version (demo/test)
 ```
+
+`cvctl` talks to the daemon over `~/.crashvault/crashvaultd.sock`; pass
+`--socket PATH` when the daemon uses a different store root. All commands
+accept `--json` for scripting.
 
 ## Architecture
 
@@ -91,17 +116,25 @@ cvctl simulate-crash       # Run crash simulator demo
 crashvaultd (single process, multiple threads)
 │
 ├── Watcher Thread (inotify/epoll)
-│   └── → Debouncer (coalesces burst events, 300ms quiet window)
-│         └── → Bounded Queue (mutex + 2 condvars, back-pressure)
-│               └── → Worker Pool (N threads, nice +10)
+│   └── → Debouncer (coalesces burst events, quiet window)
+│         └── → Bounded Queue (mutex + 2 condvars, back-pressure, aging)
+│               └── → Worker Pool (N threads, nice +10, small files first)
+│                     ├── flock + stat-before/after safe read
 │                     ├── Chunk file (FastCDC)
 │                     ├── SHA-256 hash chunks
-│                     ├── Write to object store (temp+fsync+rename)
-│                     ├── Write manifest (WAL)
-│                     └── Update snapshot (WAL commit)
+│                     ├── Write chunks (temp+fsync+rename+fsync dir)
+│                     ├── WAL PREPARE → write manifest → COMMIT
+│                     ├── Append per-path history → COMPLETE
+│                     └── Mark snapshot dirty
+│
+├── Main Thread
+│   ├── WAL replay on startup (crash recovery)
+│   ├── Quiescence auto-snapshots
+│   └── SIGHUP config reload
 │
 └── IPC Thread (Unix socket, 0600)
-    └── → cvctl / web_gateway → React dashboard
+    ├── → cvctl
+    └── → web_gateway → browser dashboard
 ```
 
 ### On-Disk Layout
@@ -112,19 +145,42 @@ crashvaultd (single process, multiple threads)
   crashvaultd.sock          ← Unix domain socket (0600)
   config.ini                ← User config
   wal/
-    wal.log                 ← Write-ahead log
-    wal.checkpoint          ← Checkpoint LSN
+    <seq>.wal               ← Incomplete operation (PREPARE or COMMIT)
+    <seq>.wal.done          ← Completed operation (GC'd after 200 entries)
   objects/
-    ab/cdef...              ← Content-addressed chunks (SHA-256 keyed)
+    ab/cdef...              ← Content-addressed chunks (SHA-256 keyed, 0444)
   manifests/
     <id>.json               ← Per-file version manifest
   snapshots/
-    <id>.json               ← Project snapshot
+    <id>.json               ← Project snapshot (path → manifest id)
   meta/
     file_history.json       ← path → [version_ids]
   logs/
     daemon.log              ← Daemon log
 ```
+
+### Crash Recovery
+
+Every version write follows this protocol:
+
+1. write chunks (temp → fsync → rename → fsync dir)
+2. WAL PREPARE (intent durable)
+3. write manifest (atomic)
+4. WAL COMMIT
+5. append history
+6. WAL COMPLETE
+
+On startup the daemon replays every `.wal` entry:
+
+| Entry state | Recovery action |
+|---|---|
+| PREPARE, no manifest | discard (chunks are harmless and GC'd later) |
+| PREPARE, manifest exists | finish history append (crash between 3 and 4) |
+| COMMIT | re-append history idempotently, then COMPLETE |
+| COMPLETE | not replayed |
+
+`cvctl verify` re-hashes every chunk and checks every history reference;
+`cvctl gc` enforces retention and removes unreferenced manifests/chunks.
 
 ## Build Variants
 
@@ -161,15 +217,16 @@ The daemon handles signals via the **self-pipe trick**: the signal handler write
 4. **No cross-machine sync**: CrashVault is single-machine only.
 5. **No hard links or special files**: Only regular files are versioned.
 6. **inotify watch limit**: The kernel defaults to 8192 or 65536 watches. For large trees, raise it: `echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches`.
-
+7. **Dashboard has no authentication**: `web_gateway` binds to `127.0.0.1` by default. Do not expose it on a public interface.
+8. **Failpoints are debug-only**: `CV_FAILPOINT` crash injection is compiled out in `Release` builds.
 
 ## CI
 
 GitHub Actions runs:
 1. Build (Release + RelWithDebInfo)
 2. Unit tests (doctest)
-3. ASan/UBSan build + tests
-4. TSan build + tests
-5. Integration tests (Python)
-6. Fault-injection table (Phase 4+)
-7. 100-run crash demo (Phase 6+)
+3. Integration tests (watcher, daemon IPC, crash recovery, web gateway)
+4. End-to-end demo + repeated crash-consistency demo
+5. ASan/UBSan build + unit tests
+6. TSan build + unit tests
+7. Benchmark smoke build (`bench_store`)

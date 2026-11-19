@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# scripts/demo.sh — CrashVault Phase 1 demo script
-# Shows the daemon starting, watching a directory, and detecting file changes.
-# In Phase 6 this will be extended to the full crash simulation demo.
+# scripts/demo.sh — CrashVault end-to-end demo
+#
+# Exercises the real daemon through its public IPC interface:
+#   versioning → history → snapshots → restore → verify → GC → crash recovery
+#
+# The crash is deterministic: `cvctl simulate-crash` arms a failpoint that
+# makes the daemon exit abruptly after the next version, then the demo restarts
+# it and proves WAL replay retained the committed state.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,21 +21,21 @@ pass() { echo -e "${GREEN}PASS${NC} $*"; }
 fail() { echo -e "${RED}FAIL${NC} $*"; exit 1; }
 info() { echo -e "${CYAN}INFO${NC} $*"; }
 
-# ── 0. Find binary ────────────────────────────────────────────────────────────
+# ── 0. Find binaries ─────────────────────────────────────────────────────────
 DAEMON="${BUILD_DIR}/crashvaultd"
 CVCTL="${BUILD_DIR}/cvctl"
-if [[ ! -x "$DAEMON" ]]; then
-  fail "crashvaultd not found at $DAEMON — run: cmake -B build && cmake --build build"
-fi
+[[ -x "$DAEMON" ]] || fail "crashvaultd not found at $DAEMON — run: cmake -B build && cmake --build build"
+[[ -x "$CVCTL" ]]  || fail "cvctl not found at $CVCTL"
 
 info "crashvaultd: $DAEMON"
 info "cvctl:       $CVCTL"
 
-# ── 1. Set up temp environment ────────────────────────────────────────────────
+# ── 1. Temporary environment ────────────────────────────────────────────────
 TMPDIR=$(mktemp -d /tmp/cv_demo_XXXXXX)
 WATCHDIR="${TMPDIR}/watched"
 STOREDIR="${TMPDIR}/store"
 LOGFILE="${TMPDIR}/daemon.log"
+SOCK="${STOREDIR}/crashvaultd.sock"
 mkdir -p "$WATCHDIR" "$STOREDIR"
 
 cleanup() {
@@ -42,103 +47,132 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Write config
 cat > "${STOREDIR}/config.ini" <<EOF
 [daemon]
 worker_count = 2
 debounce_ms = 200
-scheduling_policy = fcfs
+scheduling_policy = priority
+snapshot_quiescence_s = 1
 [watch]
 root = ${WATCHDIR}
 EOF
 
-# ── 2. Start daemon ───────────────────────────────────────────────────────────
-info "Starting crashvaultd in foreground mode..."
-"$DAEMON" --foreground --debug --store "$STOREDIR" \
-  --config "${STOREDIR}/config.ini" --log "$LOGFILE" &
-DAEMON_PID=$!
-sleep 1
+ctl() { "$CVCTL" --socket "$SOCK" "$@"; }
 
-if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-  fail "Daemon failed to start. Log:"
-  cat "$LOGFILE" || true
-fi
-pass "Daemon running (pid=$DAEMON_PID)"
+wait_for_socket() {
+  for _ in $(seq 1 50); do
+    if ctl ping >/dev/null 2>&1; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
 
-# ── 3. Ping daemon ────────────────────────────────────────────────────────────
-if [[ -x "$CVCTL" ]]; then
-  info "Pinging daemon via cvctl..."
-  PING_RESP=$("$CVCTL" --socket "${STOREDIR}/crashvaultd.sock" ping)
-  if echo "$PING_RESP" | grep -q "pong"; then
-    pass "cvctl ping → pong"
-  else
-    info "cvctl ping response: $PING_RESP"
+start_daemon() {
+  "$DAEMON" --foreground --debug --store "$STOREDIR" \
+    --config "${STOREDIR}/config.ini" --log "$LOGFILE" \
+    >"${TMPDIR}/daemon.stdout" 2>&1 &
+  DAEMON_PID=$!
+  if ! wait_for_socket; then
+    cat "$LOGFILE" 2>/dev/null || true
+    fail "daemon failed to start"
   fi
-fi
+  pass "Daemon running (pid=$DAEMON_PID)"
+}
 
-# ── 4. Write files using different patterns ───────────────────────────────────
-info "Writing files using vim-style (atomic rename)..."
+# ── 2. Start daemon ─────────────────────────────────────────────────────────
+info "Starting crashvaultd..."
+start_daemon
+
+info "Pinging daemon via cvctl..."
+ctl ping | grep -q pong && pass "cvctl ping → pong"
+
+# ── 3. Write files using different patterns ─────────────────────────────────
+info "Writing files using vim-style atomic rename..."
 TMP_FILE="${WATCHDIR}/.vim_tmp"
 echo "Hello from vim" > "$TMP_FILE"
 mv "$TMP_FILE" "${WATCHDIR}/vim_file.txt"
-sleep 0.5
 
 info "Writing files using direct write..."
-echo "Direct write content" > "${WATCHDIR}/direct_file.txt"
-sleep 0.5
+echo "Direct write v1" > "${WATCHDIR}/direct_file.txt"
 
 info "Appending to a log file..."
 for i in $(seq 1 5); do
   echo "Log line $i" >> "${WATCHDIR}/app.log"
   sleep 0.05
 done
-sleep 0.5
+sleep 1.2  # debounce + worker drain
 
-# ── 5. Check settled events in log ───────────────────────────────────────────
-sleep 0.3  # extra wait for debounce
-info "Checking daemon log for settled events..."
+ctl list | grep -q "vim_file.txt"    && pass "vim_file.txt tracked"
+ctl list | grep -q "direct_file.txt" && pass "direct_file.txt tracked"
+ctl list | grep -q "app.log"         && pass "app.log tracked"
 
-SETTLED_COUNT=$(grep -c "Settled:" "$LOGFILE" 2>/dev/null || echo 0)
-info "Total settled events: $SETTLED_COUNT"
+# ── 4. Real versions + history ──────────────────────────────────────────────
+info "Creating a second version of direct_file.txt..."
+echo "Direct write v2" > "${WATCHDIR}/direct_file.txt"
+sleep 1.0
+HIST=$(ctl history "${WATCHDIR}/direct_file.txt")
+echo "$HIST" | grep -q "v1" && pass "history contains v1"
+echo "$HIST" | grep -q "v2" && pass "history contains v2"
 
-if grep -q "vim_file.txt" "$LOGFILE"; then
-  pass "vim_file.txt was detected"
+ctl status | grep -q "Versions stored:" && pass "status reports versions"
+
+# ── 5. Snapshots ────────────────────────────────────────────────────────────
+info "Creating an explicit snapshot..."
+SNAP_OUT=$(ctl snapshot-now "${WATCHDIR}")
+SNAP_ID=$(echo "$SNAP_OUT" | awk -F'"' '/Snapshot:/ {print $2}')
+[[ -n "$SNAP_ID" ]] || fail "snapshot-now returned no id"
+pass "snapshot created: $SNAP_ID"
+ctl snapshots | grep -q "$SNAP_ID" && pass "snapshot listed"
+
+# ── 6. Restore ──────────────────────────────────────────────────────────────
+info "Restoring version 1 of direct_file.txt to a separate path..."
+ctl restore "${WATCHDIR}/direct_file.txt" 1 --dest "${TMPDIR}/restored.txt" >/dev/null
+if grep -q "Direct write v1" "${TMPDIR}/restored.txt"; then
+  pass "restore v1 produced the original content"
 else
-  fail "vim_file.txt was NOT detected in daemon log"
+  fail "restore v1 content mismatch"
 fi
 
-if grep -q "direct_file.txt" "$LOGFILE"; then
-  pass "direct_file.txt was detected"
-else
-  fail "direct_file.txt was NOT detected in daemon log"
-fi
+# ── 7. Verify + GC ──────────────────────────────────────────────────────────
+info "Verifying manifests and chunk hashes..."
+ctl verify | grep -q "OK: all manifests" && pass "verify: store healthy"
 
-if grep -q "app.log" "$LOGFILE"; then
-  pass "app.log was detected"
-else
-  fail "app.log was NOT detected in daemon log"
-fi
+info "Running garbage collection..."
+ctl gc >/dev/null && pass "gc completed"
 
-# ── 6. Status via cvctl ───────────────────────────────────────────────────────
-if [[ -x "$CVCTL" ]]; then
-  info "Daemon status:"
-  "$CVCTL" --socket "${STOREDIR}/crashvaultd.sock" status || true
-fi
+# ── 8. Deterministic crash + recovery ───────────────────────────────────────
+sleep 0.5  # let the queue drain so the next event is definitely the trigger
+info "Arming simulate-crash and writing a trigger file..."
+ctl simulate-crash >/dev/null
+echo "survive the crash" > "${WATCHDIR}/crash_survivor.txt"
 
-# ── 7. Graceful shutdown ──────────────────────────────────────────────────────
-info "Sending SIGTERM to daemon..."
-kill -SIGTERM "$DAEMON_PID"
-wait "$DAEMON_PID" 2>/dev/null && true
+info "Waiting for daemon to die abruptly..."
+CRASH_RC=0
+wait "$DAEMON_PID" || CRASH_RC=$?
 DAEMON_PID=""
+[[ "$CRASH_RC" -eq 90 ]] && pass "daemon crashed abruptly (exit 90)" || \
+  fail "expected exit 90, got $CRASH_RC"
 
-if grep -q "stopped cleanly" "$LOGFILE"; then
-  pass "Daemon shut down cleanly"
+info "Restarting daemon (WAL replay)..."
+start_daemon
+sleep 0.5
+ctl verify | grep -q "OK: all manifests" && pass "store healthy after crash"
+if ctl list | grep -q "crash_survivor.txt"; then
+  pass "version written before crash survived WAL replay"
 else
-  info "Note: 'stopped cleanly' not found in log (may be a timing issue)"
-  pass "Daemon exited (Phase 1 demo complete)"
+  # The trigger file was versioned before the crash, so it must be present.
+  fail "crash_survivor.txt missing after recovery"
 fi
+ctl status | grep -q "Pending WAL:     0" && pass "WAL fully replayed"
+
+# ── 9. Graceful shutdown ────────────────────────────────────────────────────
+info "Sending shutdown via cvctl..."
+ctl shutdown >/dev/null
+wait "$DAEMON_PID" 2>/dev/null || true
+DAEMON_PID=""
+grep -q "stopped cleanly" "$LOGFILE" && pass "daemon shut down cleanly"
 
 echo
 echo "════════════════════════════════════════"
-echo " Phase 1 Demo: ALL CHECKS PASSED ✓"
+echo " CrashVault demo: ALL CHECKS PASSED ✓"
 echo "════════════════════════════════════════"

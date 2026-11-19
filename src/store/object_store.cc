@@ -2,6 +2,7 @@
 #include "object_store.h"
 #include "../../vendor/sha256.h"
 #include "../daemon/logger.h"
+#include "../daemon/failpoint.h"
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
@@ -11,6 +12,8 @@
 #include <cstdio>
 #include <stdexcept>
 #include <sstream>
+#include <thread>
+#include <functional>
 
 namespace cv {
 
@@ -52,8 +55,14 @@ bool ObjectStore::write_chunk(const std::string &sha256,
     if (!ensure_shard_dir(sha256)) return false;
 
     std::string final_path = chunk_path(sha256);
-    // Temp file in the same directory (same filesystem = atomic rename possible)
-    std::string tmp_path = final_path + ".tmp." + std::to_string(getpid());
+    // Temp file in the same directory (same filesystem = atomic rename possible).
+    // Include the thread id: two workers can race on the same chunk, and a
+    // pid-only temp name would make one of them mistake the other's in-progress
+    // temp file for a completed chunk (and then reference a chunk that may
+    // never be renamed into place if that writer fails).
+    std::string tmp_path = final_path + ".tmp." + std::to_string(getpid()) +
+                           "." + std::to_string(
+                               std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
     // ── Step 1: Write to temp file ────────────────────────────────────────────
     // O_EXCL: fail if temp file already exists (avoid stomping concurrent write)
@@ -74,6 +83,8 @@ bool ObjectStore::write_chunk(const std::string &sha256,
         return false;
     }
 
+    CV_FAILPOINT("object_after_write");
+
     // ── Step 2: fsync — flush data to stable storage ──────────────────────────
     // WHY: Without fsync, the kernel may buffer the data. If the system crashes
     // before the buffer is flushed, the temp file contents are lost. We must
@@ -86,6 +97,8 @@ bool ObjectStore::write_chunk(const std::string &sha256,
     }
     close(fd);
 
+    CV_FAILPOINT("object_after_fsync");
+
     // ── Step 3: Atomic rename into final position ─────────────────────────────
     // WHY rename is atomic: POSIX guarantees rename(2) is atomic on the same
     // filesystem — the directory entry atomically switches from old to new.
@@ -95,6 +108,8 @@ bool ObjectStore::write_chunk(const std::string &sha256,
         unlink(tmp_path.c_str());
         return false;
     }
+
+    CV_FAILPOINT("object_after_rename");
 
     // ── Step 4: fsync the directory ───────────────────────────────────────────
     // WHY: The rename updated the directory entry in memory. Without fsync(dir),

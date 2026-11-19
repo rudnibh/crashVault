@@ -58,7 +58,7 @@ class Wal {
 public:
     explicit Wal(const std::string &store_root);
 
-    // Write a PREPARE entry. Returns the sequence number.
+    // Write a PREPARE entry. Returns the sequence number, or 0 on I/O failure.
     // WHY: We log the intent before writing any data, so a crash during write
     // is recoverable — we just discard the in-progress operation.
     uint64_t prepare(const std::string &manifest_id, const std::string &file_path,

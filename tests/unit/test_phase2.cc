@@ -7,6 +7,9 @@
 #include "../../src/store/versioner.h"
 #include "../../src/store/wal.h"
 #include "../../src/store/recovery.h"
+#include "../../src/store/gc.h"
+#include "../../src/pipeline/buffer_pool.h"
+#include "../../src/daemon/failpoint.h"
 #include "../../vendor/sha256.h"
 #include "../../src/daemon/config.h"
 #include "../../src/daemon/logger.h"
@@ -18,6 +21,8 @@
 #include <filesystem>
 #include <random>
 #include <chrono>
+#include <thread>
+#include <atomic>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -179,6 +184,25 @@ TEST_CASE("chunk file — real file on disk") {
         CHECK(c.sha256 == cv::sha256_hex(c.data.data(), c.data.size()));
     });
     CHECK(ok);
+    CHECK(total == data.size());
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("chunk file — mmap path for large files") {
+    cv::FastCDCChunker chunker;
+    auto tmpdir = make_tmpdir();
+    std::string path = tmpdir + "/large.bin";
+    std::string data = random_bytes(2 * 1024 * 1024);
+    write_file(path, data);
+
+    size_t total = 0, chunks = 0;
+    bool ok = chunker.chunk_file(path, 1024, [&](cv::Chunk &&c) {
+        total += c.size;
+        chunks++;
+        CHECK(c.sha256 == cv::sha256_hex(c.data.data(), c.data.size()));
+    });
+    CHECK(ok);
+    CHECK(chunks > 1);
     CHECK(total == data.size());
     fs::remove_all(tmpdir);
 }
@@ -727,6 +751,32 @@ TEST_CASE("PREPARE-only entry is discarded safely") {
     fs::remove_all(tmpdir);
 }
 
+TEST_CASE("PREPARE entry with a durable manifest is completed") {
+    auto tmpdir = make_tmpdir();
+    cv::ManifestStore ms(tmpdir);
+    cv::Wal wal(tmpdir);
+
+    cv::Manifest m;
+    m.id = "manifest-before-commit";
+    m.path = "/project/crash.cc";
+    m.version = 1;
+    m.sha256 = std::string(64, 'b');
+    REQUIRE(ms.write_manifest(m));
+
+    // Crash point: manifest written, wal.commit() never reached.
+    uint64_t seq = wal.prepare(m.id, m.path, 1, {});
+    REQUIRE(seq > 0);
+
+    auto stats = cv::recover_wal(wal, ms);
+    CHECK(stats.pending == 1);
+    CHECK(stats.repaired == 1);
+    CHECK(stats.discarded == 0);
+    CHECK(ms.get_history(m.path) == std::vector<std::string>{m.id});
+    CHECK(wal.replay().empty());
+
+    fs::remove_all(tmpdir);
+}
+
 TEST_CASE("replay is idempotent when history already contains manifest") {
     auto tmpdir = make_tmpdir();
     cv::ManifestStore ms(tmpdir);
@@ -855,3 +905,228 @@ TEST_CASE("delete_manifest removes it from disk") {
 }
 
 } // TEST_SUITE ManifestStore advanced
+
+// ─── Phase 5: GC, snapshots, restore helpers ─────────────────────────────────
+TEST_SUITE("GC and snapshot restore") {
+
+TEST_CASE("retention trims history and reclaims unreferenced chunks") {
+    auto storedir = make_tmpdir();
+    auto watchdir = make_tmpdir();
+    cv::Config cfg = make_store_config(storedir, watchdir);
+    cv::log_init("", cv::LogLevel::ERROR, false);
+
+    cv::ObjectStore   obj(storedir);
+    cv::ManifestStore ms(storedir);
+    cv::Wal           wal(storedir);
+    cv::Versioner     v(cfg, obj, ms, wal);
+
+    std::string filepath = watchdir + "/grow.bin";
+    std::vector<std::string> versions;
+    std::string last_content;
+    for (int i = 0; i < 4; i++) {
+        last_content = random_bytes(64 * 1024) + std::to_string(i);
+        write_file(filepath, last_content);
+        auto r = v.process(filepath, false);
+        REQUIRE(r.status == cv::VersionResult::Status::OK);
+        versions.push_back(r.manifest_id);
+    }
+    REQUIRE(ms.get_history(filepath).size() == 4);
+
+    auto stats = cv::run_gc(ms, obj, 1, 30);
+    CHECK(stats.history_entries_trimmed == 3);
+    auto hist = ms.get_history(filepath);
+    REQUIRE(hist.size() == 1);
+    CHECK(hist[0] == versions.back());
+
+    // Old manifests are gone; only the newest remains.
+    CHECK(!ms.has_manifest(versions[0]));
+    CHECK(!ms.has_manifest(versions[1]));
+    CHECK(!ms.has_manifest(versions[2]));
+    CHECK(ms.has_manifest(versions[3]));
+    CHECK(stats.chunks_deleted > 0);
+    CHECK(stats.bytes_reclaimed > 0);
+
+    // The surviving manifest is still fully restorable.
+    write_file(filepath, "overwritten");
+    CHECK(v.restore(versions.back()));
+    CHECK(read_file(filepath) == last_content);
+
+    fs::remove_all(storedir);
+    fs::remove_all(watchdir);
+}
+
+TEST_CASE("GC keeps manifests referenced by a snapshot") {
+    auto storedir = make_tmpdir();
+    auto watchdir = make_tmpdir();
+    cv::Config cfg = make_store_config(storedir, watchdir);
+    cv::log_init("", cv::LogLevel::ERROR, false);
+
+    cv::ObjectStore   obj(storedir);
+    cv::ManifestStore ms(storedir);
+    cv::Wal           wal(storedir);
+    cv::Versioner     v(cfg, obj, ms, wal);
+
+    std::string filepath = watchdir + "/keep.txt";
+    write_file(filepath, "old content");
+    auto old = v.process(filepath, false);
+    REQUIRE(old.status == cv::VersionResult::Status::OK);
+
+    cv::Snapshot snap;
+    REQUIRE(ms.create_snapshot(watchdir, snap));
+
+    write_file(filepath, "new content");
+    auto newer = v.process(filepath, false);
+    REQUIRE(newer.status == cv::VersionResult::Status::OK);
+
+    cv::run_gc(ms, obj, 1, 30); // history keeps 1, but snapshot protects old
+    CHECK(ms.has_manifest(old.manifest_id));
+    CHECK(ms.has_manifest(newer.manifest_id));
+
+    fs::remove_all(storedir);
+    fs::remove_all(watchdir);
+}
+
+TEST_CASE("restore_snapshot writes an isolated copy") {
+    auto storedir = make_tmpdir();
+    auto watchdir = make_tmpdir();
+    auto restoredir = make_tmpdir();
+    cv::Config cfg = make_store_config(storedir, watchdir);
+    cv::log_init("", cv::LogLevel::ERROR, false);
+
+    cv::ObjectStore   obj(storedir);
+    cv::ManifestStore ms(storedir);
+    cv::Wal           wal(storedir);
+    cv::Versioner     v(cfg, obj, ms, wal);
+
+    std::string f1 = watchdir + "/a.txt";
+    std::string f2 = watchdir + "/sub/b.txt";
+    fs::create_directories(watchdir + "/sub");
+    write_file(f1, "snapshot A");
+    write_file(f2, "snapshot B");
+    REQUIRE(v.process(f1, false).status == cv::VersionResult::Status::OK);
+    REQUIRE(v.process(f2, false).status == cv::VersionResult::Status::OK);
+
+    cv::Snapshot snap;
+    REQUIRE(ms.create_snapshot(watchdir, snap));
+
+    // Change both source files after the snapshot.
+    write_file(f1, "changed A");
+    write_file(f2, "changed B");
+
+    REQUIRE(v.restore_snapshot(snap, restoredir));
+    CHECK(read_file(restoredir + "/a.txt") == "snapshot A");
+    CHECK(read_file(restoredir + "/sub/b.txt") == "snapshot B");
+    // Original files must not have been touched.
+    CHECK(read_file(f1) == "changed A");
+
+    fs::remove_all(storedir);
+    fs::remove_all(watchdir);
+    fs::remove_all(restoredir);
+}
+
+TEST_CASE("restore_latest picks the newest manifest") {
+    auto storedir = make_tmpdir();
+    auto watchdir = make_tmpdir();
+    cv::Config cfg = make_store_config(storedir, watchdir);
+    cv::log_init("", cv::LogLevel::ERROR, false);
+
+    cv::ObjectStore   obj(storedir);
+    cv::ManifestStore ms(storedir);
+    cv::Wal           wal(storedir);
+    cv::Versioner     v(cfg, obj, ms, wal);
+
+    std::string path = watchdir + "/latest.txt";
+    write_file(path, "one");
+    REQUIRE(v.process(path, false).status == cv::VersionResult::Status::OK);
+    write_file(path, "two");
+    REQUIRE(v.process(path, false).status == cv::VersionResult::Status::OK);
+
+    write_file(path, "garbage");
+    REQUIRE(v.restore_latest(path));
+    CHECK(read_file(path) == "two");
+
+    fs::remove_all(storedir);
+    fs::remove_all(watchdir);
+}
+
+TEST_CASE("failpoint_enabled reads CV_FAILPOINT") {
+    unsetenv("CV_FAILPOINT");
+    CHECK(!cv::failpoint_enabled("wal_after_commit"));
+    setenv("CV_FAILPOINT", "wal_after_commit", 1);
+    CHECK(cv::failpoint_enabled("wal_after_commit"));
+    CHECK(!cv::failpoint_enabled("wal_after_prepare"));
+    unsetenv("CV_FAILPOINT");
+}
+
+} // TEST_SUITE GC and snapshot restore
+
+// ─── Phase 6: bounded-memory read budget ─────────────────────────────────────
+TEST_SUITE("BufferPool") {
+
+TEST_CASE("leases enforce the byte budget") {
+    cv::BufferPool pool(1000);
+
+    auto a = pool.acquire(600);
+    CHECK(pool.in_use() == 600);
+    CHECK(pool.available() == 400);
+
+    {
+        auto b = pool.acquire(400);
+        CHECK(pool.available() == 0);
+    }
+    CHECK(pool.available() == 400);
+
+    a.release();
+    CHECK(pool.in_use() == 0);
+
+    // An oversized request reserves the whole budget and runs alone.
+    auto big = pool.acquire(5000);
+    CHECK(pool.in_use() == pool.capacity());
+    big.release();
+    CHECK(pool.in_use() == 0);
+}
+
+TEST_CASE("acquire blocks until memory is released") {
+    cv::BufferPool pool(100);
+    auto held = pool.acquire(100);
+
+    std::atomic<bool> acquired{false};
+    std::thread t([&] {
+        auto lease = pool.acquire(100);
+        acquired.store(true);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(!acquired.load());
+
+    held.release();
+    t.join();
+    CHECK(acquired.load());
+    CHECK(pool.in_use() == 0);
+}
+
+TEST_CASE("large file works with a tiny read budget") {
+    auto storedir = make_tmpdir();
+    auto watchdir = make_tmpdir();
+    cv::Config cfg = make_store_config(storedir, watchdir);
+    cfg.memory_cap_bytes = 1024; // deliberately smaller than the file
+    cv::log_init("", cv::LogLevel::ERROR, false);
+
+    cv::ObjectStore   obj(storedir);
+    cv::ManifestStore ms(storedir);
+    cv::Wal           wal(storedir);
+    cv::Versioner     v(cfg, obj, ms, wal);
+
+    std::string path = watchdir + "/big.bin";
+    write_file(path, random_bytes(2 * 1024 * 1024));
+
+    auto r = v.process(path, false);
+    CHECK(r.status == cv::VersionResult::Status::OK);
+    CHECK(r.chunks_written > 1);
+    CHECK(v.read_budget_in_use() == 0); // lease released on return
+
+    fs::remove_all(storedir);
+    fs::remove_all(watchdir);
+}
+
+} // TEST_SUITE BufferPool

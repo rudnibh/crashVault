@@ -27,6 +27,7 @@
 #include "object_store.h"
 #include "manifest.h"
 #include "wal.h"
+#include "../pipeline/buffer_pool.h"
 #include "../daemon/config.h"
 
 namespace cv {
@@ -59,20 +60,36 @@ public:
     // Process one settled event. Thread-safe (each worker calls this independently).
     VersionResult process(const std::string &path, bool deleted);
 
+    // Live read-budget statistics (for status / diagnostics).
+    size_t read_budget_in_use()    const { return buffer_pool_.in_use(); }
+    size_t read_budget_capacity()  const { return buffer_pool_.capacity(); }
+
     // Restore a file to a specific version (by manifest_id).
     // Writes to temp, fsyncs, then atomically renames into place.
     bool restore(const std::string &manifest_id,
                  const std::string &dest_path = "") const;
 
+    // Restore the newest version recorded for `path`.
+    bool restore_latest(const std::string &path,
+                        const std::string &dest_path = "") const;
+
+    // Restore every file in a snapshot. If dest_root is empty the original
+    // paths are overwritten; otherwise files are written under dest_root,
+    // preserving their path relative to snapshot.root.
+    bool restore_snapshot(const Snapshot &snap,
+                          const std::string &dest_root = "") const;
+
 private:
     bool safe_read(const std::string &path, std::vector<uint8_t> &data,
-                   StatBuf &st_out, VersionResult &result);
+                   StatBuf &st_out, VersionResult &result,
+                   BufferPool::Lease &read_lease);
 
     const Config    &cfg_;
     ObjectStore     &obj_store_;
     ManifestStore   &manifest_store_;
     Wal             &wal_;
     std::unique_ptr<IChunker> chunker_;
+    BufferPool      buffer_pool_;
 };
 
 } // namespace cv

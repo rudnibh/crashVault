@@ -133,6 +133,15 @@ bool ManifestStore::write_json_file(const std::string &path,
     if (rename(tmp.c_str(), path.c_str()) != 0) {
         unlink(tmp.c_str()); return false;
     }
+
+    // fsync the containing directory so the rename itself is durable.
+    size_t slash = path.find_last_of('/');
+    std::string dir = (slash == std::string::npos) ? "." : path.substr(0, slash);
+    int dir_fd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd >= 0) {
+        fsync(dir_fd); // best effort
+        close(dir_fd);
+    }
     return true;
 }
 

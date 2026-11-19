@@ -2,6 +2,7 @@
 #include "versioner.h"
 #include "../../vendor/sha256.h"
 #include "../daemon/logger.h"
+#include "../daemon/failpoint.h"
 
 // Use a using-declaration so "struct stat" unambiguously refers to the POSIX type,
 // not anything in namespace cv.
@@ -28,6 +29,7 @@ Versioner::Versioner(const Config &cfg, ObjectStore &obj_store,
     , obj_store_(obj_store)
     , manifest_store_(manifest_store)
     , wal_(wal)
+    , buffer_pool_(cfg.memory_cap_bytes)
 {
     FastCDCConfig cdc_cfg;
     chunker_ = std::make_unique<FastCDCChunker>(cdc_cfg);
@@ -36,7 +38,8 @@ Versioner::Versioner(const Config &cfg, ObjectStore &obj_store,
 // Safe file read: flock(LOCK_SH|LOCK_NB) + pre/post fstat to detect concurrent writes.
 // WHY retry with exponential backoff: writers hold LOCK_EX briefly.
 bool Versioner::safe_read(const std::string &path, std::vector<uint8_t> &data,
-                           StatBuf &st_out, VersionResult &result) {
+                           StatBuf &st_out, VersionResult &result,
+                           BufferPool::Lease &read_lease) {
     constexpr int MAX_RETRIES = 5;
     int delay_ms = 50;
 
@@ -49,17 +52,21 @@ bool Versioner::safe_read(const std::string &path, std::vector<uint8_t> &data,
             return false;
         }
 
-        // Try shared advisory lock (non-blocking)
-        // WHY LOCK_SH|LOCK_NB: If a writer holds LOCK_EX, we get EWOULDBLOCK
-        // and back off. For non-cooperating writers we fall through (no lock).
-        if (flock(fd, LOCK_SH | LOCK_NB) != 0 && errno != EWOULDBLOCK) {
-            // flock not supported (NFS etc.) — proceed unlocked
-        } else if (errno == EWOULDBLOCK) {
-            close(fd);
-            LOG_DEBUG("File locked by writer, retrying: " + path);
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-            delay_ms *= 2;
-            continue;
+        // Try shared advisory lock (non-blocking).
+        // WHY LOCK_SH|LOCK_NB: If a writer holds LOCK_EX we get EWOULDBLOCK and
+        // back off. For filesystems without flock support we proceed unlocked
+        // and rely on the before/after stat() comparison below.
+        // NOTE: do not inspect errno after a successful flock() — it may hold a
+        // stale value from an earlier call.
+        if (flock(fd, LOCK_SH | LOCK_NB) != 0) {
+            if (errno == EWOULDBLOCK) {
+                close(fd);
+                LOG_DEBUG("File locked by writer, retrying: " + path);
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                delay_ms *= 2;
+                continue;
+            }
+            // flock unsupported — continue unlocked.
         }
 
         // stat BEFORE reading
@@ -71,16 +78,29 @@ bool Versioner::safe_read(const std::string &path, std::vector<uint8_t> &data,
             return false;
         }
 
-        // Read the whole file
-        data.resize(static_cast<size_t>(st_before.st_size));
-        if (!data.empty()) {
-            ssize_t n = read(fd, data.data(), data.size());
-            if (n < 0 || static_cast<size_t>(n) != data.size()) {
-                flock(fd, LOCK_UN);
-                close(fd);
-                result.status = VersionResult::Status::ERROR;
-                return false;
-            }
+        // Reserve memory before allocating. The lease is held by the caller
+        // until hashing + chunking finish, so concurrent workers cannot exceed
+        // the configured memory budget (except for one oversized file, which
+        // runs alone; see BufferPool).
+        size_t file_size = static_cast<size_t>(st_before.st_size);
+        read_lease = buffer_pool_.acquire(file_size);
+
+        // Read the whole file. read(2) may legally return short for large
+        // files; loop until the expected byte count is reached.
+        data.resize(file_size);
+        size_t got = 0;
+        bool read_error = false;
+        while (got < data.size()) {
+            ssize_t n = read(fd, data.data() + got, data.size() - got);
+            if (n <= 0) { read_error = true; break; }
+            got += static_cast<size_t>(n);
+        }
+        if (read_error) {
+            read_lease.release();
+            flock(fd, LOCK_UN);
+            close(fd);
+            result.status = VersionResult::Status::ERROR;
+            return false;
         }
 
         // stat AFTER reading — detect concurrent modification
@@ -94,6 +114,7 @@ bool Versioner::safe_read(const std::string &path, std::vector<uint8_t> &data,
             st_before.st_size  != st_after.st_size) {
             LOG_DEBUG("File changed during read (attempt " +
                       std::to_string(attempt + 1) + "): " + path);
+            read_lease.release();
             data.clear();
             std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
             delay_ms *= 2;
@@ -119,10 +140,11 @@ VersionResult Versioner::process(const std::string &path, bool deleted) {
         return result;
     }
 
-    // ── 1. Safe read ─────────────────────────────────────────────────────────
+    // ── 1. Safe read (bounded by the read budget) ────────────────────────────
     std::vector<uint8_t> data;
     StatBuf st{};
-    if (!safe_read(path, data, st, result)) return result;
+    BufferPool::Lease read_lease;
+    if (!safe_read(path, data, st, result, read_lease)) return result;
 
     // ── 2. Whole-file SHA-256 ─────────────────────────────────────────────────
     std::string file_sha256 = sha256_hex(data.data(), data.size());
@@ -160,8 +182,17 @@ VersionResult Versioner::process(const std::string &path, bool deleted) {
         }
     });
 
+    CV_FAILPOINT("versioner_after_chunks");
+
     // ── WAL PREPARE: intent recorded; crash here → orphaned chunks (safe, GC'd later)
+    // If the WAL cannot be written we must not claim a crash-consistent
+    // version: the chunks are harmless orphans and GC will reclaim them.
     uint64_t wal_seq = wal_.prepare(m.id, path, m.version, m.chunks);
+    if (wal_seq == 0) {
+        LOG_ERROR("WAL prepare failed; refusing to commit version for: " + path);
+        result.status = VersionResult::Status::ERROR;
+        return result;
+    }
 
     // ── 4. Write manifest (atomic) ────────────────────────────────────────────
     if (!manifest_store_.write_manifest(m)) {
@@ -169,6 +200,8 @@ VersionResult Versioner::process(const std::string &path, bool deleted) {
         result.status = VersionResult::Status::ERROR;
         return result;
     }
+
+    CV_FAILPOINT("versioner_after_manifest");
 
     // ── WAL COMMIT: manifest is durable; crash here → replay re-appends history
     if (!wal_.commit(wal_seq)) {
@@ -183,11 +216,14 @@ VersionResult Versioner::process(const std::string &path, bool deleted) {
                  " — WAL entry left pending for replay");
     }
 
+    CV_FAILPOINT("versioner_after_history");
+
     // ── WAL COMPLETE: all durable state written; entry can be GC'd ────────────
     // WHY only on success: a crash/replay must still see the entry if the
     // history update failed. Completing prematurely would lose that version
     // from the user-visible history even though its chunks/manifest exist.
     if (history_ok) wal_.complete(wal_seq);
+    CV_FAILPOINT("versioner_after_complete");
 
     result.manifest_id = m.id;
     result.status = VersionResult::Status::OK;
@@ -256,6 +292,61 @@ bool Versioner::restore(const std::string &manifest_id,
 
     LOG_INFO("Restored " + dest + " from manifest " + manifest_id);
     return true;
+}
+
+bool Versioner::restore_latest(const std::string &path,
+                               const std::string &dest_path) const {
+    auto history = manifest_store_.get_history(path);
+    for (auto it = history.rbegin(); it != history.rend(); ++it) {
+        if (manifest_store_.has_manifest(*it))
+            return restore(*it, dest_path);
+    }
+    LOG_ERROR("No restorable version for " + path);
+    return false;
+}
+
+static void mkdir_p(const std::string &path) {
+    if (path.empty()) return;
+    for (size_t i = 1; i < path.size(); i++) {
+        if (path[i] == '/') {
+            std::string sub = path.substr(0, i);
+            mkdir(sub.c_str(), 0755);
+        }
+    }
+    mkdir(path.c_str(), 0755);
+}
+
+bool Versioner::restore_snapshot(const Snapshot &snap,
+                                 const std::string &dest_root) const {
+    bool all_ok = true;
+    std::string root = snap.root;
+    while (root.size() > 1 && root.back() == '/') root.pop_back();
+
+    for (const auto &[path, manifest_id] : snap.files) {
+        std::string dest = path;
+        if (!dest_root.empty()) {
+            std::string relative;
+            if (!root.empty() && path.rfind(root, 0) == 0) {
+                relative = path.substr(root.size());
+                if (relative.empty() || relative[0] != '/') relative = "/" + relative;
+            } else {
+                // Not under the recorded root: keep only the basename so we
+                // never write outside dest_root.
+                size_t slash = path.find_last_of('/');
+                relative = "/" + (slash == std::string::npos ? path : path.substr(slash + 1));
+            }
+            dest = dest_root + relative;
+        }
+
+        size_t slash = dest.find_last_of('/');
+        if (slash != std::string::npos) mkdir_p(dest.substr(0, slash));
+
+        if (!restore(manifest_id, dest)) {
+            LOG_ERROR("Snapshot restore failed for " + path);
+            all_ok = false;
+        }
+    }
+    return all_ok;
 }
 
 } // namespace cv

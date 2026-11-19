@@ -197,11 +197,11 @@ def test_overflow(watch_dir: str, log_file: str, n_files: int = 1024):
     """Generate more events than the kernel inotify queue to trigger IN_Q_OVERFLOW.
     After overflow, the daemon must rescan and no files must be permanently missed.
 
-    NOTE: This test requires the daemon to implement rescan-on-overflow.
-    In Phase 1, the daemon logs the overflow; full rescan is Phase 2.
-    We validate that:
+    The watcher implements rescan-on-overflow: it re-adds directory watches and
+    emits a MODIFIED event for every regular file, so dropped kernel events are
+    recovered. We validate that:
     - The daemon did NOT crash
-    - The overflow was detected and logged
+    - If overflow triggered, it was detected and logged
     """
     overflow_dir = os.path.join(watch_dir, "overflow_test")
     os.makedirs(overflow_dir, exist_ok=True)
