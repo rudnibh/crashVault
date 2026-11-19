@@ -125,6 +125,18 @@ add_library(cv_pipeline STATIC
 )
 target_link_libraries(cv_pipeline PUBLIC cv_daemon_core)
 
+# ── Library: store (Phase 2) ─────────────────────────────────────────────────
+# Content-defined chunking (FastCDC), SHA-256 object store, manifests, versioner
+add_library(cv_store STATIC
+  src/store/chunker.cc
+  src/store/object_store.cc
+  src/store/manifest.cc
+  src/store/versioner.cc
+)
+target_link_libraries(cv_store PUBLIC cv_daemon_core nlohmann_json::nlohmann_json)
+# Suppress GCC 16 false-positive array-bounds in nlohmann/json headers
+target_compile_options(cv_store PRIVATE -Wno-array-bounds)
+
 # ── Library: IPC ──────────────────────────────────────────────────────────────
 add_library(cv_ipc STATIC
   src/ipc/socket_server.cc
@@ -139,6 +151,7 @@ target_link_libraries(crashvaultd PRIVATE
   cv_daemon_core
   cv_watcher
   cv_pipeline
+  cv_store
   cv_ipc
   nlohmann_json::nlohmann_json
 )
@@ -169,8 +182,19 @@ target_link_libraries(test_phase1 PRIVATE
   cv_pipeline
   doctest::doctest
 )
-# doctest self-registration: we just run the binary
 add_test(NAME unit_phase1 COMMAND test_phase1)
+
+# Phase 2 unit tests: chunker, object store, manifest, versioner round-trip
+add_executable(test_phase2
+  tests/unit/test_phase2.cc
+)
+target_link_libraries(test_phase2 PRIVATE
+  cv_store
+  cv_daemon_core
+  doctest::doctest
+)
+target_compile_options(test_phase2 PRIVATE -Wno-array-bounds)
+add_test(NAME unit_phase2 COMMAND test_phase2)
 
 # Integration tests (Python scripts — discovered by CTest)
 find_program(PYTHON3 python3)

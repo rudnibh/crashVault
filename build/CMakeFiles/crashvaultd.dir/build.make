@@ -99,6 +99,7 @@ crashvaultd: CMakeFiles/crashvaultd.dir/compiler_depend.ts
 crashvaultd: libcv_daemon_core.a
 crashvaultd: libcv_watcher.a
 crashvaultd: libcv_pipeline.a
+crashvaultd: libcv_store.a
 crashvaultd: libcv_ipc.a
 crashvaultd: libcv_daemon_core.a
 crashvaultd: CMakeFiles/crashvaultd.dir/link.txt

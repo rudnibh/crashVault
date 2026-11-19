@@ -51,6 +51,10 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o
  /home/rudnibh/Projects/crashvault/src/ipc/socket_server.h
  /home/rudnibh/Projects/crashvault/src/pipeline/bounded_queue.h
  /home/rudnibh/Projects/crashvault/src/pipeline/worker_pool.h
+ /home/rudnibh/Projects/crashvault/src/store/chunker.h
+ /home/rudnibh/Projects/crashvault/src/store/manifest.h
+ /home/rudnibh/Projects/crashvault/src/store/object_store.h
+ /home/rudnibh/Projects/crashvault/src/store/versioner.h
  /home/rudnibh/Projects/crashvault/src/watcher/debouncer.h
  /home/rudnibh/Projects/crashvault/src/watcher/inotify_watcher.h
  /home/rudnibh/Projects/crashvault/src/daemon/config.h
@@ -421,4 +425,31 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o
  /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/stdarg.h
  /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/stddef.h
  /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/stdint.h
+
+crashvaultd
+ /usr/lib/Scrt1.o
+ /usr/lib/crti.o
+ /usr/lib/crtn.o
+ /usr/lib/libatomic.so
+ /usr/lib/libatomic_asneeded.so
+ /usr/lib/libc.so
+ /usr/lib/libgcc_s.so
+ /usr/lib/libgcc_s.so.1
+ /usr/lib/libm.so
+ /usr/lib/libpthread.a
+ /usr/lib/libstdc++.so
+ /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtbeginS.o
+ /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtendS.o
+ /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/libgcc.a
+ /usr/lib/ld-linux-x86-64.so.2
+ /usr/lib/libc.so.6
+ /usr/lib/libc_nonshared.a
+ /usr/lib/libm.so.6
+ /usr/lib/libmvec.so.1
+ /home/rudnibh/Projects/crashvault/build/CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o
+ /home/rudnibh/Projects/crashvault/build/libcv_daemon_core.a
+ /home/rudnibh/Projects/crashvault/build/libcv_ipc.a
+ /home/rudnibh/Projects/crashvault/build/libcv_pipeline.a
+ /home/rudnibh/Projects/crashvault/build/libcv_store.a
+ /home/rudnibh/Projects/crashvault/build/libcv_watcher.a
 

@@ -211,6 +211,19 @@ cv_pipeline/fast:
 .PHONY : cv_pipeline/fast
 
 #=============================================================================
+# Target rules for targets named cv_store
+
+# Build rule for target.
+cv_store: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cv_store
+.PHONY : cv_store
+
+# fast build rule for target.
+cv_store/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/build
+.PHONY : cv_store/fast
+
+#=============================================================================
 # Target rules for targets named cv_ipc
 
 # Build rule for target.
@@ -261,6 +274,19 @@ test_phase1: cmake_check_build_system
 test_phase1/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_phase1.dir/build.make CMakeFiles/test_phase1.dir/build
 .PHONY : test_phase1/fast
+
+#=============================================================================
+# Target rules for targets named test_phase2
+
+# Build rule for target.
+test_phase2: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_phase2
+.PHONY : test_phase2
+
+# fast build rule for target.
+test_phase2/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_phase2.dir/build.make CMakeFiles/test_phase2.dir/build
+.PHONY : test_phase2/fast
 
 #=============================================================================
 # Target rules for targets named doctest_with_main
@@ -491,6 +517,102 @@ src/pipeline/worker_pool.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_pipeline.dir/build.make CMakeFiles/cv_pipeline.dir/src/pipeline/worker_pool.cc.s
 .PHONY : src/pipeline/worker_pool.cc.s
 
+src/store/chunker.o: src/store/chunker.cc.o
+.PHONY : src/store/chunker.o
+
+# target to build an object file
+src/store/chunker.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/chunker.cc.o
+.PHONY : src/store/chunker.cc.o
+
+src/store/chunker.i: src/store/chunker.cc.i
+.PHONY : src/store/chunker.i
+
+# target to preprocess a source file
+src/store/chunker.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/chunker.cc.i
+.PHONY : src/store/chunker.cc.i
+
+src/store/chunker.s: src/store/chunker.cc.s
+.PHONY : src/store/chunker.s
+
+# target to generate assembly for a file
+src/store/chunker.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/chunker.cc.s
+.PHONY : src/store/chunker.cc.s
+
+src/store/manifest.o: src/store/manifest.cc.o
+.PHONY : src/store/manifest.o
+
+# target to build an object file
+src/store/manifest.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/manifest.cc.o
+.PHONY : src/store/manifest.cc.o
+
+src/store/manifest.i: src/store/manifest.cc.i
+.PHONY : src/store/manifest.i
+
+# target to preprocess a source file
+src/store/manifest.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/manifest.cc.i
+.PHONY : src/store/manifest.cc.i
+
+src/store/manifest.s: src/store/manifest.cc.s
+.PHONY : src/store/manifest.s
+
+# target to generate assembly for a file
+src/store/manifest.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/manifest.cc.s
+.PHONY : src/store/manifest.cc.s
+
+src/store/object_store.o: src/store/object_store.cc.o
+.PHONY : src/store/object_store.o
+
+# target to build an object file
+src/store/object_store.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/object_store.cc.o
+.PHONY : src/store/object_store.cc.o
+
+src/store/object_store.i: src/store/object_store.cc.i
+.PHONY : src/store/object_store.i
+
+# target to preprocess a source file
+src/store/object_store.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/object_store.cc.i
+.PHONY : src/store/object_store.cc.i
+
+src/store/object_store.s: src/store/object_store.cc.s
+.PHONY : src/store/object_store.s
+
+# target to generate assembly for a file
+src/store/object_store.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/object_store.cc.s
+.PHONY : src/store/object_store.cc.s
+
+src/store/versioner.o: src/store/versioner.cc.o
+.PHONY : src/store/versioner.o
+
+# target to build an object file
+src/store/versioner.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/versioner.cc.o
+.PHONY : src/store/versioner.cc.o
+
+src/store/versioner.i: src/store/versioner.cc.i
+.PHONY : src/store/versioner.i
+
+# target to preprocess a source file
+src/store/versioner.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/versioner.cc.i
+.PHONY : src/store/versioner.cc.i
+
+src/store/versioner.s: src/store/versioner.cc.s
+.PHONY : src/store/versioner.s
+
+# target to generate assembly for a file
+src/store/versioner.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cv_store.dir/build.make CMakeFiles/cv_store.dir/src/store/versioner.cc.s
+.PHONY : src/store/versioner.cc.s
+
 src/watcher/debouncer.o: src/watcher/debouncer.cc.o
 .PHONY : src/watcher/debouncer.o
 
@@ -563,6 +685,30 @@ tests/unit/test_phase1.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_phase1.dir/build.make CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.s
 .PHONY : tests/unit/test_phase1.cc.s
 
+tests/unit/test_phase2.o: tests/unit/test_phase2.cc.o
+.PHONY : tests/unit/test_phase2.o
+
+# target to build an object file
+tests/unit/test_phase2.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_phase2.dir/build.make CMakeFiles/test_phase2.dir/tests/unit/test_phase2.cc.o
+.PHONY : tests/unit/test_phase2.cc.o
+
+tests/unit/test_phase2.i: tests/unit/test_phase2.cc.i
+.PHONY : tests/unit/test_phase2.i
+
+# target to preprocess a source file
+tests/unit/test_phase2.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_phase2.dir/build.make CMakeFiles/test_phase2.dir/tests/unit/test_phase2.cc.i
+.PHONY : tests/unit/test_phase2.cc.i
+
+tests/unit/test_phase2.s: tests/unit/test_phase2.cc.s
+.PHONY : tests/unit/test_phase2.s
+
+# target to generate assembly for a file
+tests/unit/test_phase2.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_phase2.dir/build.make CMakeFiles/test_phase2.dir/tests/unit/test_phase2.cc.s
+.PHONY : tests/unit/test_phase2.cc.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -580,10 +726,12 @@ help:
 	@echo "... cv_daemon_core"
 	@echo "... cv_ipc"
 	@echo "... cv_pipeline"
+	@echo "... cv_store"
 	@echo "... cv_watcher"
 	@echo "... cvctl"
 	@echo "... doctest_with_main"
 	@echo "... test_phase1"
+	@echo "... test_phase2"
 	@echo "... src/cli/main.o"
 	@echo "... src/cli/main.i"
 	@echo "... src/cli/main.s"
@@ -611,6 +759,18 @@ help:
 	@echo "... src/pipeline/worker_pool.o"
 	@echo "... src/pipeline/worker_pool.i"
 	@echo "... src/pipeline/worker_pool.s"
+	@echo "... src/store/chunker.o"
+	@echo "... src/store/chunker.i"
+	@echo "... src/store/chunker.s"
+	@echo "... src/store/manifest.o"
+	@echo "... src/store/manifest.i"
+	@echo "... src/store/manifest.s"
+	@echo "... src/store/object_store.o"
+	@echo "... src/store/object_store.i"
+	@echo "... src/store/object_store.s"
+	@echo "... src/store/versioner.o"
+	@echo "... src/store/versioner.i"
+	@echo "... src/store/versioner.s"
 	@echo "... src/watcher/debouncer.o"
 	@echo "... src/watcher/debouncer.i"
 	@echo "... src/watcher/debouncer.s"
@@ -620,6 +780,9 @@ help:
 	@echo "... tests/unit/test_phase1.o"
 	@echo "... tests/unit/test_phase1.i"
 	@echo "... tests/unit/test_phase1.s"
+	@echo "... tests/unit/test_phase2.o"
+	@echo "... tests/unit/test_phase2.i"
+	@echo "... tests/unit/test_phase2.s"
 .PHONY : help
 
 

@@ -1,10 +1,12 @@
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/cv_daemon_core.dir
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/cv_watcher.dir
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/cv_pipeline.dir
+/home/rudnibh/Projects/crashvault/build/CMakeFiles/cv_store.dir
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/cv_ipc.dir
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/crashvaultd.dir
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/cvctl.dir
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/test_phase1.dir
+/home/rudnibh/Projects/crashvault/build/CMakeFiles/test_phase2.dir
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/test.dir
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/edit_cache.dir
 /home/rudnibh/Projects/crashvault/build/CMakeFiles/rebuild_cache.dir

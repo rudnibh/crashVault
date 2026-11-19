@@ -192,6 +192,15 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: \
  /usr/include/c++/16.1.1/pstl/glue_memory_defs.h \
  /usr/include/c++/16.1.1/pstl/execution_defs.h \
  /home/rudnibh/Projects/crashvault/src/daemon/../ipc/socket_server.h \
+ /home/rudnibh/Projects/crashvault/src/daemon/../store/object_store.h \
+ /home/rudnibh/Projects/crashvault/src/daemon/../store/manifest.h \
+ /home/rudnibh/Projects/crashvault/src/daemon/../store/versioner.h \
+ /usr/include/sys/stat.h /usr/include/bits/stat.h \
+ /usr/include/bits/struct_stat.h /usr/include/bits/statx.h \
+ /usr/include/linux/stat.h /usr/include/bits/statx-generic.h \
+ /usr/include/bits/types/struct_statx_timestamp.h \
+ /usr/include/bits/types/struct_statx.h \
+ /home/rudnibh/Projects/crashvault/src/daemon/../store/chunker.h \
  /usr/include/c++/16.1.1/iostream /usr/include/c++/16.1.1/ostream \
  /usr/include/c++/16.1.1/bits/ostream.h /usr/include/c++/16.1.1/ios \
  /usr/include/c++/16.1.1/bits/ios_base.h \
@@ -218,12 +227,7 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: \
  /usr/include/c++/16.1.1/x86_64-pc-linux-gnu/bits/c++io.h \
  /usr/include/c++/16.1.1/bits/fstream.tcc /usr/include/c++/16.1.1/sstream \
  /usr/include/c++/16.1.1/bits/sstream.tcc /usr/include/c++/16.1.1/cstring \
- /usr/include/string.h /usr/include/strings.h /usr/include/sys/stat.h \
- /usr/include/bits/stat.h /usr/include/bits/struct_stat.h \
- /usr/include/bits/statx.h /usr/include/linux/stat.h \
- /usr/include/bits/statx-generic.h \
- /usr/include/bits/types/struct_statx_timestamp.h \
- /usr/include/bits/types/struct_statx.h \
+ /usr/include/string.h /usr/include/strings.h \
  /home/rudnibh/Projects/crashvault/build/_deps/nlohmann_json-src/include/nlohmann/json.hpp \
  /usr/include/c++/16.1.1/algorithm \
  /usr/include/c++/16.1.1/bits/stl_algo.h \

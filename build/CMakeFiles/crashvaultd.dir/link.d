@@ -6,6 +6,7 @@ crashvaultd: \
   libcv_daemon_core.a \
   libcv_watcher.a \
   libcv_pipeline.a \
+  libcv_store.a \
   libcv_ipc.a \
   libcv_daemon_core.a \
   /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/../../../../lib/libstdc++.so \
@@ -54,6 +55,8 @@ libcv_daemon_core.a:
 libcv_watcher.a:
 
 libcv_pipeline.a:
+
+libcv_store.a:
 
 libcv_ipc.a:
 

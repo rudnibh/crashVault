@@ -374,6 +374,50 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
   /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/stdint.h \
   /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/syslimits.h
 
+test_phase1: /usr/lib/Scrt1.o \
+  /usr/lib/crti.o \
+  /usr/lib/crtn.o \
+  /usr/lib/libatomic.so \
+  /usr/lib/libatomic_asneeded.so \
+  /usr/lib/libc.so \
+  /usr/lib/libgcc_s.so \
+  /usr/lib/libgcc_s.so.1 \
+  /usr/lib/libm.so \
+  /usr/lib/libpthread.a \
+  /usr/lib/libstdc++.so \
+  /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtbeginS.o \
+  /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtendS.o \
+  /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/libgcc.a \
+  /usr/lib/ld-linux-x86-64.so.2 \
+  /usr/lib/libc.so.6 \
+  /usr/lib/libc_nonshared.a \
+  /usr/lib/libm.so.6 \
+  /usr/lib/libmvec.so.1 \
+  CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o \
+  libcv_daemon_core.a \
+  libcv_pipeline.a \
+  libcv_watcher.a
+
+
+libcv_watcher.a:
+
+libcv_pipeline.a:
+
+CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o:
+
+/usr/lib/libm.so.6:
+
+/usr/lib/ld-linux-x86-64.so.2:
+
+/usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/libgcc.a:
+
+/usr/lib/libpthread.a:
+
+/usr/lib/libgcc_s.so.1:
+
+/usr/lib/libatomic.so:
+
+/usr/lib/Scrt1.o:
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/syslimits.h:
 
@@ -429,6 +473,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 
 /usr/include/c++/16.1.1/vector:
 
+/usr/lib/libstdc++.so:
+
 /usr/include/locale.h:
 
 /usr/include/c++/16.1.1/utility:
@@ -461,6 +507,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 
 /usr/include/c++/16.1.1/map:
 
+/usr/lib/libc_nonshared.a:
+
 /usr/include/c++/16.1.1/istream:
 
 /usr/include/c++/16.1.1/ios:
@@ -468,6 +516,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 /usr/include/c++/16.1.1/iomanip:
 
 /usr/include/c++/16.1.1/initializer_list:
+
+/usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtbeginS.o:
 
 /usr/include/c++/16.1.1/functional:
 
@@ -490,6 +540,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 /usr/include/c++/16.1.1/deque:
 
 /usr/include/c++/16.1.1/bits/algorithmfwd.h:
+
+/usr/lib/crti.o:
 
 /usr/include/c++/16.1.1/bits/stl_bvector.h:
 
@@ -575,6 +627,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 
 /usr/include/bits/stdlib-bsearch.h:
 
+/usr/lib/libatomic_asneeded.so:
+
 /usr/include/bits/types/struct_timeval.h:
 
 /usr/include/bits/stdio_lim.h:
@@ -631,6 +685,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 
 /usr/include/bits/signum-arch.h:
 
+/usr/lib/libm.so:
+
 /usr/include/c++/16.1.1/bits/ostream_print.h:
 
 /usr/include/c++/16.1.1/bits/locale_classes.tcc:
@@ -647,6 +703,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 
 /usr/include/bits/posix_opt.h:
 
+/usr/lib/libmvec.so.1:
+
 /usr/include/c++/16.1.1/bits/allocated_ptr.h:
 
 /usr/include/c++/16.1.1/bits/stl_multiset.h:
@@ -660,6 +718,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 /usr/include/sys/select.h:
 
 /usr/include/c++/16.1.1/cstring:
+
+/usr/lib/libgcc_s.so:
 
 /usr/include/c++/16.1.1/algorithm:
 
@@ -698,6 +758,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 /usr/include/asm-generic/errno.h:
 
 /usr/include/c++/16.1.1/bits/fs_ops.h:
+
+/usr/lib/libc.so:
 
 /usr/include/bits/pthreadtypes.h:
 
@@ -819,6 +881,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 
 /usr/include/bits/pthread_stack_min-dynamic.h:
 
+libcv_daemon_core.a:
+
 /usr/include/asm-generic/errno-base.h:
 
 /usr/include/c++/16.1.1/bits/uses_allocator_args.h:
@@ -912,6 +976,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 /usr/include/c++/16.1.1/bits/basic_string.h:
 
 /usr/include/c++/16.1.1/bits/basic_string.tcc:
+
+/usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtendS.o:
 
 /usr/include/c++/16.1.1/cfloat:
 
@@ -1073,6 +1139,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 
 /usr/include/c++/16.1.1/bits/stl_tempbuf.h:
 
+/usr/lib/crtn.o:
+
 /usr/include/c++/16.1.1/bits/stl_tree.h:
 
 /usr/include/c++/16.1.1/bits/stl_uninitialized.h:
@@ -1110,6 +1178,8 @@ CMakeFiles/test_phase1.dir/tests/unit/test_phase1.cc.o: /home/rudnibh/Projects/c
 /usr/include/bits/floatn-common.h:
 
 /usr/include/c++/16.1.1/csignal:
+
+/usr/lib/libc.so.6:
 
 /usr/include/c++/16.1.1/bits/stl_iterator_base_types.h:
 

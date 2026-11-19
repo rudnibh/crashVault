@@ -50,6 +50,10 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: /home/rudnibh/Projects/crashvau
   /home/rudnibh/Projects/crashvault/src/ipc/socket_server.h \
   /home/rudnibh/Projects/crashvault/src/pipeline/bounded_queue.h \
   /home/rudnibh/Projects/crashvault/src/pipeline/worker_pool.h \
+  /home/rudnibh/Projects/crashvault/src/store/chunker.h \
+  /home/rudnibh/Projects/crashvault/src/store/manifest.h \
+  /home/rudnibh/Projects/crashvault/src/store/object_store.h \
+  /home/rudnibh/Projects/crashvault/src/store/versioner.h \
   /home/rudnibh/Projects/crashvault/src/watcher/debouncer.h \
   /home/rudnibh/Projects/crashvault/src/watcher/inotify_watcher.h \
   /home/rudnibh/Projects/crashvault/src/daemon/config.h \
@@ -421,8 +425,50 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: /home/rudnibh/Projects/crashvau
   /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/stddef.h \
   /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/stdint.h
 
+crashvaultd: /usr/lib/Scrt1.o \
+  /usr/lib/crti.o \
+  /usr/lib/crtn.o \
+  /usr/lib/libatomic.so \
+  /usr/lib/libatomic_asneeded.so \
+  /usr/lib/libc.so \
+  /usr/lib/libgcc_s.so \
+  /usr/lib/libgcc_s.so.1 \
+  /usr/lib/libm.so \
+  /usr/lib/libpthread.a \
+  /usr/lib/libstdc++.so \
+  /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtbeginS.o \
+  /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtendS.o \
+  /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/libgcc.a \
+  /usr/lib/ld-linux-x86-64.so.2 \
+  /usr/lib/libc.so.6 \
+  /usr/lib/libc_nonshared.a \
+  /usr/lib/libm.so.6 \
+  /usr/lib/libmvec.so.1 \
+  CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o \
+  libcv_daemon_core.a \
+  libcv_ipc.a \
+  libcv_pipeline.a \
+  libcv_store.a \
+  libcv_watcher.a
 
-/usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/stdint.h:
+
+libcv_watcher.a:
+
+libcv_pipeline.a:
+
+CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o:
+
+/usr/lib/libm.so.6:
+
+/usr/lib/ld-linux-x86-64.so.2:
+
+/usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/libgcc.a:
+
+/usr/lib/libpthread.a:
+
+/usr/lib/libgcc_s.so.1:
+
+/usr/lib/Scrt1.o:
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/stddef.h:
 
@@ -445,6 +491,8 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: /home/rudnibh/Projects/crashvau
 /usr/include/pthread.h:
 
 /usr/include/linux/types.h:
+
+libcv_store.a:
 
 /usr/include/linux/stddef.h:
 
@@ -524,6 +572,8 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: /home/rudnibh/Projects/crashvau
 
 /usr/include/c++/16.1.1/iterator:
 
+/usr/lib/libc_nonshared.a:
+
 /usr/include/c++/16.1.1/istream:
 
 /usr/include/c++/16.1.1/ios:
@@ -531,6 +581,8 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: /home/rudnibh/Projects/crashvau
 /usr/include/c++/16.1.1/iomanip:
 
 /usr/include/c++/16.1.1/initializer_list:
+
+/usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtbeginS.o:
 
 /usr/include/c++/16.1.1/functional:
 
@@ -604,6 +656,8 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: /home/rudnibh/Projects/crashvau
 
 /usr/include/c++/16.1.1/bits/unique_lock.h:
 
+libcv_ipc.a:
+
 /usr/include/stdc-predef.h:
 
 /usr/include/c++/16.1.1/bits/uniform_int_dist.h:
@@ -615,6 +669,8 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: /home/rudnibh/Projects/crashvau
 /usr/include/c++/16.1.1/bits/stl_vector.h:
 
 /usr/include/c++/16.1.1/bits/stl_uninitialized.h:
+
+/usr/lib/crtn.o:
 
 /usr/include/c++/16.1.1/bits/stl_tree.h:
 
@@ -630,7 +686,13 @@ CMakeFiles/crashvaultd.dir/src/daemon/main.cc.o: /home/rudnibh/Projects/crashvau
 
 /usr/include/c++/16.1.1/bits/stl_multimap.h:
 
-/usr/include/bits/stdio_lim.h:
+/usr/lib/libc.so.6:
+
+/usr/include/c++/16.1.1/cstdio:
+
+/usr/include/c++/16.1.1/bits/stl_iterator_base_types.h:
+
+/usr/include/c++/16.1.1/bits/stl_iterator.h:
 
 /usr/include/bits/types/__fpos64_t.h:
 
@@ -658,6 +720,8 @@ _deps/nlohmann_json-src/include/nlohmann/detail/input/binary_reader.hpp:
 
 /usr/include/bits/stdlib-bsearch.h:
 
+/usr/include/bits/stdio_lim.h:
+
 /usr/include/c++/16.1.1/debug/debug.h:
 
 /usr/include/c++/16.1.1/bits/stl_numeric.h:
@@ -667,6 +731,8 @@ _deps/nlohmann_json-src/include/nlohmann/detail/input/binary_reader.hpp:
 _deps/nlohmann_json-src/include/nlohmann/detail/iterators/internal_iterator.hpp:
 
 _deps/nlohmann_json-src/include/nlohmann/detail/meta/call_std/end.hpp:
+
+/usr/lib/libc.so:
 
 /usr/include/bits/pthreadtypes.h:
 
@@ -730,21 +796,13 @@ _deps/nlohmann_json-src/include/nlohmann/detail/input/position_t.hpp:
 
 /usr/include/asm/bitsperlong.h:
 
+libcv_daemon_core.a:
+
 /usr/include/c++/16.1.1/cassert:
 
 /usr/include/c++/16.1.1/bits/uses_allocator_args.h:
 
 /usr/include/asm-generic/errno-base.h:
-
-/usr/include/c++/16.1.1/tuple:
-
-/usr/include/bits/types/__sigset_t.h:
-
-_deps/nlohmann_json-src/include/nlohmann/detail/hash.hpp:
-
-/usr/include/ctype.h:
-
-/usr/include/c++/16.1.1/bits/new_allocator.h:
 
 /usr/include/c++/16.1.1/tr1/modified_bessel_func.tcc:
 
@@ -754,13 +812,11 @@ _deps/nlohmann_json-src/include/nlohmann/detail/abi_macros.hpp:
 
 /usr/include/bits/statx.h:
 
+/usr/include/asm-generic/types.h:
+
+/usr/include/asm-generic/bitsperlong.h:
+
 _deps/nlohmann_json-src/include/nlohmann/detail/macro_scope.hpp:
-
-/usr/include/c++/16.1.1/streambuf:
-
-/usr/include/c++/16.1.1/bits/this_thread_sleep.h:
-
-_deps/nlohmann_json-src/include/nlohmann/thirdparty/hedley/hedley.hpp:
 
 /usr/include/c++/16.1.1/bits/algorithmfwd.h:
 
@@ -800,6 +856,12 @@ _deps/nlohmann_json-src/include/nlohmann/detail/iterators/primitive_iterator.hpp
 
 _deps/nlohmann_json-src/include/nlohmann/detail/iterators/iterator_traits.hpp:
 
+/usr/include/c++/16.1.1/tr1/legendre_function.tcc:
+
+/usr/include/alloca.h:
+
+_deps/nlohmann_json-src/include/nlohmann/detail/iterators/iteration_proxy.hpp:
+
 /usr/include/bits/mathcalls-narrow.h:
 
 /usr/include/c++/16.1.1/bits/basic_string.h:
@@ -828,10 +890,6 @@ _deps/nlohmann_json-src/include/nlohmann/byte_container_with_subtype.hpp:
 
 /usr/include/c++/16.1.1/bits/specfun.h:
 
-/usr/include/asm-generic/types.h:
-
-/usr/include/asm-generic/bitsperlong.h:
-
 /usr/include/wctype.h:
 
 /usr/include/sched.h:
@@ -858,6 +916,8 @@ _deps/nlohmann_json-src/include/nlohmann/detail/conversions/from_json.hpp:
 
 /usr/include/c++/16.1.1/bits/std_mutex.h:
 
+/usr/lib/libmvec.so.1:
+
 /usr/include/c++/16.1.1/bits/allocated_ptr.h:
 
 _deps/nlohmann_json-src/include/nlohmann/detail/conversions/to_chars.hpp:
@@ -879,6 +939,14 @@ _deps/nlohmann_json-src/include/nlohmann/json.hpp:
 /usr/include/c++/16.1.1/bits/locale_facets.tcc:
 
 _deps/nlohmann_json-src/include/nlohmann/detail/value_t.hpp:
+
+/usr/include/c++/16.1.1/streambuf:
+
+/usr/include/c++/16.1.1/bits/this_thread_sleep.h:
+
+_deps/nlohmann_json-src/include/nlohmann/thirdparty/hedley/hedley.hpp:
+
+/home/rudnibh/Projects/crashvault/src/store/object_store.h:
 
 /usr/include/c++/16.1.1/locale:
 
@@ -902,7 +970,25 @@ _deps/nlohmann_json-src/include/nlohmann/detail/meta/is_sax.hpp:
 
 /usr/include/c++/16.1.1/bits/codecvt.h:
 
+/usr/include/c++/16.1.1/limits:
+
+/usr/include/c++/16.1.1/bits/streambuf_iterator.h:
+
+/usr/include/c++/16.1.1/bits/stl_map.h:
+
+/usr/include/c++/16.1.1/bits/forward_list.tcc:
+
 /usr/include/bits/setjmp.h:
+
+_deps/nlohmann_json-src/include/nlohmann/detail/hash.hpp:
+
+/usr/include/c++/16.1.1/tuple:
+
+/usr/include/bits/types/__sigset_t.h:
+
+/usr/include/ctype.h:
+
+/usr/include/c++/16.1.1/bits/new_allocator.h:
 
 /usr/include/c++/16.1.1/tr1/hypergeometric.tcc:
 
@@ -938,23 +1024,27 @@ _deps/nlohmann_json-src/include/nlohmann/detail/output/binary_writer.hpp:
 
 _deps/nlohmann_json-src/include/nlohmann/detail/output/serializer.hpp:
 
-_deps/nlohmann_json-src/include/nlohmann/detail/iterators/iteration_proxy.hpp:
-
-/usr/include/c++/16.1.1/tr1/legendre_function.tcc:
-
-/usr/include/alloca.h:
-
 /usr/include/bits/types/time_t.h:
 
 _deps/nlohmann_json-src/include/nlohmann/thirdparty/hedley/hedley_undef.hpp:
 
 /usr/include/bits/types/__locale_t.h:
 
+/usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/include/stdint.h:
+
+/home/rudnibh/Projects/crashvault/src/store/versioner.h:
+
+/usr/include/bits/types/struct_sched_param.h:
+
+/usr/lib/libatomic.so:
+
 _deps/nlohmann_json-src/include/nlohmann/detail/macro_unscope.hpp:
 
 /usr/include/c++/16.1.1/bits/slice_array.h:
 
 /home/rudnibh/Projects/crashvault/src/ipc/socket_server.h:
+
+/usr/lib/libstdc++.so:
 
 /usr/include/locale.h:
 
@@ -983,6 +1073,8 @@ _deps/nlohmann_json-src/include/nlohmann/detail/string_concat.hpp:
 /usr/include/c++/16.1.1/iostream:
 
 /usr/include/c++/16.1.1/bits/stl_algobase.h:
+
+/home/rudnibh/Projects/crashvault/src/store/manifest.h:
 
 /home/rudnibh/Projects/crashvault/src/watcher/inotify_watcher.h:
 
@@ -1032,8 +1124,6 @@ _deps/nlohmann_json-src/include/nlohmann/adl_serializer.hpp:
 
 /usr/include/c++/16.1.1/bits/localefwd.h:
 
-/usr/include/bits/types/struct_sched_param.h:
-
 /usr/include/bits/types/struct_statx.h:
 
 /usr/include/bits/types/struct_statx_timestamp.h:
@@ -1044,6 +1134,8 @@ _deps/nlohmann_json-src/include/nlohmann/adl_serializer.hpp:
 
 /usr/include/c++/16.1.1/bits/requires_hosted.h:
 
+/usr/lib/libatomic_asneeded.so:
+
 /usr/include/bits/types/struct_timeval.h:
 
 /usr/include/c++/16.1.1/bits/locale_classes.h:
@@ -1053,10 +1145,6 @@ _deps/nlohmann_json-src/include/nlohmann/adl_serializer.hpp:
 /usr/include/bits/types/timer_t.h:
 
 /usr/include/c++/16.1.1/bits/std_abs.h:
-
-/usr/include/c++/16.1.1/cstdio:
-
-/usr/include/c++/16.1.1/bits/stl_iterator_base_types.h:
 
 /usr/include/bits/typesizes.h:
 
@@ -1069,6 +1157,8 @@ _deps/nlohmann_json-src/include/nlohmann/adl_serializer.hpp:
 /usr/include/c++/16.1.1/bits/move.h:
 
 /usr/include/bits/waitflags.h:
+
+/usr/lib/libm.so:
 
 /usr/include/c++/16.1.1/bits/locale_classes.tcc:
 
@@ -1083,6 +1173,8 @@ _deps/nlohmann_json-src/include/nlohmann/json_fwd.hpp:
 /usr/include/c++/16.1.1/cmath:
 
 /usr/include/bits/wordsize.h:
+
+/usr/lib/libgcc_s.so:
 
 _deps/nlohmann_json-src/include/nlohmann/detail/input/input_adapters.hpp:
 
@@ -1104,6 +1196,8 @@ _deps/nlohmann_json-src/include/nlohmann/detail/meta/call_std/begin.hpp:
 
 /usr/include/c++/16.1.1/backward/auto_ptr.h:
 
+/usr/lib/crti.o:
+
 /usr/include/c++/16.1.1/bits/stl_bvector.h:
 
 /usr/include/c++/16.1.1/bit:
@@ -1119,6 +1213,8 @@ _deps/nlohmann_json-src/include/nlohmann/detail/meta/call_std/begin.hpp:
 /usr/include/c++/16.1.1/backward/binders.h:
 
 /usr/include/c++/16.1.1/bits/allocator.h:
+
+/home/rudnibh/Projects/crashvault/src/store/chunker.h:
 
 /usr/include/c++/16.1.1/bits/sstream.tcc:
 
@@ -1140,6 +1236,8 @@ _deps/nlohmann_json-src/include/nlohmann/detail/meta/call_std/begin.hpp:
 
 /usr/include/c++/16.1.1/bits/basic_string.tcc:
 
+/usr/lib/gcc/x86_64-pc-linux-gnu/16.1.1/crtendS.o:
+
 /usr/include/c++/16.1.1/bits/memory_resource.h:
 
 /usr/include/linux/close_range.h:
@@ -1159,14 +1257,6 @@ _deps/nlohmann_json-src/include/nlohmann/detail/meta/call_std/begin.hpp:
 /usr/include/strings.h:
 
 /usr/include/c++/16.1.1/bits/exception_defines.h:
-
-/usr/include/c++/16.1.1/limits:
-
-/usr/include/c++/16.1.1/bits/streambuf_iterator.h:
-
-/usr/include/c++/16.1.1/bits/forward_list.tcc:
-
-/usr/include/c++/16.1.1/bits/stl_map.h:
 
 /usr/include/c++/16.1.1/bits/concept_check.h:
 
@@ -1257,5 +1347,3 @@ _deps/nlohmann_json-src/include/nlohmann/detail/iterators/iter_impl.hpp:
 /usr/include/c++/16.1.1/bits/string_view.tcc:
 
 /usr/include/c++/16.1.1/bits/stl_deque.h:
-
-/usr/include/c++/16.1.1/bits/stl_iterator.h:

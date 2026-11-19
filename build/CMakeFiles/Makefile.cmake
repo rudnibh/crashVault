@@ -78,9 +78,11 @@ set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/cv_daemon_core.dir/DependInfo.cmake"
   "CMakeFiles/cv_watcher.dir/DependInfo.cmake"
   "CMakeFiles/cv_pipeline.dir/DependInfo.cmake"
+  "CMakeFiles/cv_store.dir/DependInfo.cmake"
   "CMakeFiles/cv_ipc.dir/DependInfo.cmake"
   "CMakeFiles/crashvaultd.dir/DependInfo.cmake"
   "CMakeFiles/cvctl.dir/DependInfo.cmake"
   "CMakeFiles/test_phase1.dir/DependInfo.cmake"
+  "CMakeFiles/test_phase2.dir/DependInfo.cmake"
   "_deps/doctest-build/CMakeFiles/doctest_with_main.dir/DependInfo.cmake"
   )

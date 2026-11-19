@@ -25,6 +25,10 @@
 #include "../pipeline/bounded_queue.h"
 #include "../pipeline/worker_pool.h"
 #include "../ipc/socket_server.h"
+// Phase 2: version store
+#include "../store/object_store.h"
+#include "../store/manifest.h"
+#include "../store/versioner.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -261,13 +265,26 @@ int main(int argc, char *argv[]) {
         }
     );
 
-    // Worker pool — processes work items (Phase 1: just counts them)
+    // Phase 2: Version store — object store + manifest store + versioner
+    // WHY shared_ptr: Versioner is used by worker threads (lambda capture);
+    // shared_ptr keeps it alive past potential early-exit paths.
+    auto obj_store      = std::make_shared<cv::ObjectStore>(g_config.store_root);
+    auto manifest_store = std::make_shared<cv::ManifestStore>(g_config.store_root);
+    auto versioner      = std::make_shared<cv::Versioner>(
+                            g_config, *obj_store, *manifest_store);
+
+    // Worker pool — now calls the real versioner
     cv::WorkerPool pool(
         g_config.worker_count, queue,
-        [&](const cv::WorkItem &item) {
-            // Phase 1: log and count; Phase 2 will do actual versioning
-            LOG_INFO("Processing: " + item.path + (item.deleted ? " [deleted]" : ""));
-            g_versions_stored.fetch_add(1);
+        [&, versioner](const cv::WorkItem &item) {
+            auto res = versioner->process(item.path, item.deleted);
+            using S  = cv::VersionResult::Status;
+            if (res.status == S::OK)
+                g_versions_stored.fetch_add(1);
+            else if (res.status == S::SKIPPED_UNSTABLE)
+                LOG_WARN("Skipped (unstable): " + item.path);
+            else if (res.status == S::ERROR)
+                LOG_ERROR("Versioning error: " + item.path);
         },
         10 // nice level
     );
