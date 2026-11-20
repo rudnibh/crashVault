@@ -140,6 +140,7 @@ int InotifyWatcher::add_watch(const std::string &dirpath) {
     // Store the mapping in both directions.
     wd_to_path_[wd] = dirpath;
     path_to_wd_[dirpath] = wd;
+    watch_count_.store(wd_to_path_.size());
     LOG_DEBUG("Watching: " + dirpath + " (wd=" + std::to_string(wd) + ")");
     return wd;
 }
@@ -182,6 +183,7 @@ void InotifyWatcher::remove_watch(int wd) {
     if (it != wd_to_path_.end()) {
         path_to_wd_.erase(it->second);
         wd_to_path_.erase(it);
+        watch_count_.store(wd_to_path_.size());
     }
     inotify_rm_watch(inotify_fd_, wd);
 }
@@ -248,6 +250,25 @@ void InotifyWatcher::handle_overflow() {
 }
 
 void InotifyWatcher::handle_inotify_event(const ::inotify_event *ev) {
+    // IN_Q_OVERFLOW carries wd == -1, so it must be handled before any
+    // wd_to_path_ lookup. Missing this event would silently lose changes.
+    if (ev->mask & IN_Q_OVERFLOW) {
+        handle_overflow();
+        return;
+    }
+
+    // The kernel sends IN_IGNORED when a watch is removed (rm_watch, unmount,
+    // or deletion). Drop any stale mapping.
+    if (ev->mask & IN_IGNORED) {
+        auto i = wd_to_path_.find(ev->wd);
+        if (i != wd_to_path_.end()) {
+            path_to_wd_.erase(i->second);
+            wd_to_path_.erase(i);
+            watch_count_.store(wd_to_path_.size());
+        }
+        return;
+    }
+
     // Find the directory path for this watch descriptor
     auto it = wd_to_path_.find(ev->wd);
     if (it == wd_to_path_.end()) return; // stale wd (dir was deleted)
@@ -255,12 +276,6 @@ void InotifyWatcher::handle_inotify_event(const ::inotify_event *ev) {
     const std::string &dir = it->second;
     std::string name = (ev->len > 0) ? std::string(ev->name) : "";
     std::string full_path = dir + (name.empty() ? "" : "/" + name);
-
-    // IN_Q_OVERFLOW: ev->wd == -1
-    if (ev->mask & IN_Q_OVERFLOW) {
-        handle_overflow();
-        return;
-    }
 
     // Skip ignored files/directories
     if (!name.empty() && is_ignored(name)) return;
@@ -271,8 +286,15 @@ void InotifyWatcher::handle_inotify_event(const ::inotify_event *ev) {
         return; // directory itself not versioned
     }
     if ((ev->mask & IN_MOVED_TO) && (ev->mask & IN_ISDIR)) {
+        // If this was a rename inside the watched tree, the inode kept its old
+        // watch; remove that stale path mapping before installing the new one.
+        auto mit = pending_moves_.find(ev->cookie);
+        if (mit != pending_moves_.end()) {
+            auto wit = path_to_wd_.find(mit->second.from_path);
+            if (wit != path_to_wd_.end()) remove_watch(wit->second);
+            pending_moves_.erase(mit);
+        }
         add_watches_recursive(full_path);
-        // Also need to remove the old watch if it was a rename within our tree
         return;
     }
     if ((ev->mask & IN_DELETE) && (ev->mask & IN_ISDIR)) {
@@ -281,6 +303,7 @@ void InotifyWatcher::handle_inotify_event(const ::inotify_event *ev) {
         if (wit != path_to_wd_.end()) {
             wd_to_path_.erase(wit->second);
             path_to_wd_.erase(wit);
+            watch_count_.store(wd_to_path_.size());
         }
         return;
     }
@@ -355,15 +378,18 @@ void InotifyWatcher::event_loop() {
             }
             if (ud != 1) continue; // shouldn't happen
 
-            // Drain all available inotify events from the fd
+            // Drain all available inotify events from the fd. Retry on EINTR
+            // because a signal delivered to this thread is not an I/O error.
             ssize_t len;
-            while ((len = read(inotify_fd_, buf, BUF_SIZE)) > 0) {
+            do {
+                len = read(inotify_fd_, buf, BUF_SIZE);
+                if (len <= 0) continue;
                 for (char *p = buf; p < buf + len; ) {
                     auto *ev = reinterpret_cast<struct inotify_event *>(p);
                     handle_inotify_event(ev);
                     p += sizeof(struct inotify_event) + ev->len;
                 }
-            }
+            } while (len > 0 || (len < 0 && errno == EINTR));
             if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
                 LOG_ERROR(std::string("read inotify: ") + strerror(errno));
             }

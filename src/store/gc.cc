@@ -13,6 +13,8 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <shared_mutex>
 
 namespace cv {
 
@@ -26,13 +28,47 @@ static bool is_sha_filename(const std::string &name) {
     return true;
 }
 
+// Remove stale temp files left by an interrupted atomic write in a flat
+// metadata directory (manifests/, snapshots/, meta/). Only files older than an
+// hour are touched, so a live writer's temp file is never removed.
+static void sweep_metadata_temps(const std::string &dir, time_t now,
+                                 GcStats &stats) {
+    DIR *d = opendir(dir.c_str());
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != nullptr) {
+        std::string name = ent->d_name;
+        if (name.find(".tmp.") == std::string::npos) continue;
+        std::string full = dir + "/" + name;
+        struct stat st{};
+        if (stat(full.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+            now - st.st_mtime > 3600) {
+            if (unlink(full.c_str()) == 0) {
+                stats.temp_files_deleted++;
+                stats.bytes_reclaimed += (uint64_t)st.st_size;
+            }
+        }
+    }
+    closedir(d);
+}
+
 GcStats run_gc(ManifestStore &manifests, ObjectStore &objects,
                int retention_versions, int retention_days) {
+    // Exclusive store gate: no version/restore/snapshot/verify may run while
+    // we are deciding which objects are unreachable.
+    std::unique_lock<std::shared_mutex> store_lock(manifests.store_mutex());
     GcStats stats;
+    time_t now = time(nullptr);
+
+    // Remove temp files left by interrupted metadata writes. The store gate is
+    // exclusive here, so these cannot be live writer temp files.
+    sweep_metadata_temps(manifests.store_root() + "/manifests", now, stats);
+    sweep_metadata_temps(manifests.store_root() + "/snapshots", now, stats);
+    sweep_metadata_temps(manifests.store_root() + "/meta", now, stats);
 
     // ── 1. Expire old snapshots ───────────────────────────────────────────────
     auto snapshot_ids = manifests.list_snapshots();
-    time_t cutoff = time(nullptr) - (time_t)retention_days * 24 * 60 * 60;
+    time_t cutoff = now - (time_t)retention_days * 24 * 60 * 60;
 
     for (const auto &id : snapshot_ids) {
         Snapshot snap;
@@ -115,12 +151,27 @@ GcStats run_gc(ManifestStore &manifests, ObjectStore &objects,
         struct dirent *ent;
         while ((ent = readdir(sd)) != nullptr) {
             std::string name = ent->d_name;
-            if (!is_sha_filename(name)) continue; // skip . and .. and temp files
+            std::string full = shard_path + "/" + name;
+
+            // A crashed chunk writer can leave a temp file behind. Remove
+            // only stale ones so a currently-running writer is never touched.
+            if (name.find(".tmp.") != std::string::npos) {
+                struct stat st{};
+                if (stat(full.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+                    now - st.st_mtime > 3600) {
+                    if (unlink(full.c_str()) == 0) {
+                        stats.temp_files_deleted++;
+                        stats.bytes_reclaimed += (uint64_t)st.st_size;
+                    }
+                }
+                continue;
+            }
+
+            if (!is_sha_filename(name)) continue; // skip . and ..
 
             std::string sha = shard + name;
             if (referenced_chunks.count(sha)) continue;
 
-            std::string full = shard_path + "/" + name;
             struct stat st{};
             if (stat(full.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
                 if (unlink(full.c_str()) == 0) {
@@ -137,7 +188,8 @@ GcStats run_gc(ManifestStore &manifests, ObjectStore &objects,
              " history entries, deleted " +
              std::to_string(stats.manifests_deleted) + " manifests, " +
              std::to_string(stats.snapshots_deleted) + " snapshots, " +
-             std::to_string(stats.chunks_deleted) + " chunks (" +
+             std::to_string(stats.chunks_deleted) + " chunks, " +
+             std::to_string(stats.temp_files_deleted) + " stale temp files (" +
              std::to_string(stats.bytes_reclaimed) + " bytes)");
     return stats;
 }

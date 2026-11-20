@@ -17,11 +17,15 @@
 #include <thread>
 #include <chrono>
 #include <sstream>
+#include <functional>
+#include <shared_mutex>
 
 // Bring POSIX stat into scope so plain "struct stat" works inside namespace cv
 using ::stat;
 
 namespace cv {
+
+static void mkdir_p(const std::string &path);
 
 Versioner::Versioner(const Config &cfg, ObjectStore &obj_store,
                      ManifestStore &manifest_store, Wal &wal)
@@ -92,6 +96,7 @@ bool Versioner::safe_read(const std::string &path, std::vector<uint8_t> &data,
         bool read_error = false;
         while (got < data.size()) {
             ssize_t n = read(fd, data.data() + got, data.size() - got);
+            if (n < 0 && errno == EINTR) continue;
             if (n <= 0) { read_error = true; break; }
             got += static_cast<size_t>(n);
         }
@@ -106,11 +111,21 @@ bool Versioner::safe_read(const std::string &path, std::vector<uint8_t> &data,
         // stat AFTER reading — detect concurrent modification
         // If mtime or size changed, the read may be inconsistent → retry.
         StatBuf st_after{};
-        fstat(fd, &st_after);
+        if (fstat(fd, &st_after) != 0) {
+            read_lease.release();
+            flock(fd, LOCK_UN);
+            close(fd);
+            result.status = VersionResult::Status::ERROR;
+            return false;
+        }
         flock(fd, LOCK_UN);
         close(fd);
 
+        // Compare nanosecond timestamps too: a writer can finish a same-size
+        // update within the same second, which a seconds-only mtime check
+        // would miss.
         if (st_before.st_mtime != st_after.st_mtime ||
+            st_before.st_mtim.tv_nsec != st_after.st_mtim.tv_nsec ||
             st_before.st_size  != st_after.st_size) {
             LOG_DEBUG("File changed during read (attempt " +
                       std::to_string(attempt + 1) + "): " + path);
@@ -133,6 +148,12 @@ bool Versioner::safe_read(const std::string &path, std::vector<uint8_t> &data,
 VersionResult Versioner::process(const std::string &path, bool deleted) {
     VersionResult result;
     result.status = VersionResult::Status::ERROR;
+
+    // Hold a shared store gate for the whole operation. GC takes the exclusive
+    // side, so it cannot sweep the chunks we just wrote before our manifest is
+    // committed.
+    std::shared_lock<std::shared_mutex> store_lock(
+        manifest_store_.store_mutex());
 
     if (deleted) {
         LOG_INFO("File deleted: " + path);
@@ -172,17 +193,33 @@ VersionResult Versioner::process(const std::string &path, bool deleted) {
     m.sha256    = file_sha256;
     m.timestamp = time(nullptr);
 
+    bool chunk_store_error = false;
     chunker_->chunk(data.data(), data.size(), [&](Chunk &&chunk) {
         m.chunks.push_back(chunk.sha256);
-        if (obj_store_.write_chunk(chunk.sha256, chunk.data.data(), chunk.size)) {
-            result.chunks_written++;
-            result.bytes_stored += chunk.size;
-        } else {
-            result.chunks_deduped++;
+        switch (obj_store_.put_chunk(chunk.sha256, chunk.data.data(),
+                                     chunk.size)) {
+            case ObjectStore::WriteResult::Written:
+                result.chunks_written++;
+                result.bytes_stored += chunk.size;
+                break;
+            case ObjectStore::WriteResult::Existed:
+                result.chunks_deduped++;
+                break;
+            case ObjectStore::WriteResult::Error:
+                chunk_store_error = true;
+                break;
         }
     });
 
     CV_FAILPOINT("versioner_after_chunks");
+    if (chunk_store_error) {
+        // Never commit a manifest that references a chunk we failed to store.
+        // Any chunks written before the error are harmless orphans for GC.
+        LOG_ERROR("Object store write failed; refusing to commit version for: " +
+                  path);
+        result.status = VersionResult::Status::ERROR;
+        return result;
+    }
 
     // ── WAL PREPARE: intent recorded; crash here → orphaned chunks (safe, GC'd later)
     // If the WAL cannot be written we must not claim a crash-consistent
@@ -235,8 +272,8 @@ VersionResult Versioner::process(const std::string &path, bool deleted) {
     return result;
 }
 
-bool Versioner::restore(const std::string &manifest_id,
-                        const std::string &dest_path_override) const {
+bool Versioner::restore_locked(const std::string &manifest_id,
+                               const std::string &dest_path_override) const {
     Manifest m;
     if (!manifest_store_.read_manifest(manifest_id, m)) {
         LOG_ERROR("Cannot find manifest: " + manifest_id);
@@ -244,45 +281,84 @@ bool Versioner::restore(const std::string &manifest_id,
     }
 
     std::string dest = dest_path_override.empty() ? m.path : dest_path_override;
-    std::string tmp  = dest + ".cv_restore." + std::to_string(getpid());
+    if (dest.empty()) {
+        LOG_ERROR("Restore destination is empty for manifest " + manifest_id);
+        return false;
+    }
+
+    // Create parent directories for a --dest path outside the store.
+    size_t slash = dest.find_last_of('/');
+    if (slash != std::string::npos && slash > 0) {
+        mkdir_p(dest.substr(0, slash));
+    }
+
+    // Unique temp name: concurrent restores to the same path, or two daemon
+    // instances with the same PID after a restart, must not collide.
+    std::string tmp = dest + ".cv_restore." + std::to_string(getpid()) + "." +
+                      std::to_string(std::hash<std::thread::id>{}(
+                          std::this_thread::get_id()));
+
+    mode_t mode = static_cast<mode_t>(m.mode & 0777u);
+    if (mode == 0) mode = 0644;
 
     int fd = open(tmp.c_str(),
-                  O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-                  static_cast<mode_t>(m.mode & 0777u));
+                  O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
     if (fd < 0) {
         LOG_ERROR("Cannot open restore tmp " + tmp + ": " + strerror(errno));
         return false;
     }
 
-    // Reassemble file from chunks
+    // Reassemble file from chunks. read_chunk() re-hashes every chunk, so a
+    // corrupt object is treated as a hard restore failure instead of being
+    // silently copied into the user's file.
     for (auto &sha : m.chunks) {
         std::vector<uint8_t> chunk_data;
         if (!obj_store_.read_chunk(sha, chunk_data)) {
-            LOG_ERROR("Missing chunk " + sha.substr(0, 16) +
+            LOG_ERROR("Missing/corrupt chunk " + sha.substr(0, 16) +
                       "... during restore of " + m.path);
             close(fd);
             unlink(tmp.c_str());
             return false;
         }
-        if (!chunk_data.empty()) {
-            ssize_t w = write(fd, chunk_data.data(), chunk_data.size());
-            if (w < 0 || static_cast<size_t>(w) != chunk_data.size()) {
+
+        size_t written = 0;
+        while (written < chunk_data.size()) {
+            ssize_t w = write(fd, chunk_data.data() + written,
+                              chunk_data.size() - written);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) {
+                LOG_ERROR("write restore tmp " + tmp + ": " + strerror(errno));
                 close(fd);
                 unlink(tmp.c_str());
                 return false;
             }
+            written += static_cast<size_t>(w);
         }
     }
 
-    // fsync + atomic rename
-    if (fsync(fd) != 0) { close(fd); unlink(tmp.c_str()); return false; }
+    // Preserve the recorded mode exactly even if the process umask would have
+    // removed bits from open(). Then fsync data + metadata before rename.
+    if (fchmod(fd, mode) != 0) {
+        LOG_ERROR("fchmod restore tmp " + tmp + ": " + strerror(errno));
+        close(fd);
+        unlink(tmp.c_str());
+        return false;
+    }
+    if (fsync(fd) != 0) {
+        LOG_ERROR("fsync restore tmp " + tmp + ": " + strerror(errno));
+        close(fd);
+        unlink(tmp.c_str());
+        return false;
+    }
     close(fd);
 
     // Restore mtime via utimes (portable, no UTIME_OMIT needed)
     struct utimbuf ut;
     ut.actime  = m.mtime;
     ut.modtime = m.mtime;
-    utime(tmp.c_str(), &ut);
+    if (utime(tmp.c_str(), &ut) != 0) {
+        LOG_WARN("utime restore tmp " + tmp + ": " + strerror(errno));
+    }
 
     if (rename(tmp.c_str(), dest.c_str()) != 0) {
         LOG_ERROR("rename restore failed: " + std::string(strerror(errno)));
@@ -290,16 +366,38 @@ bool Versioner::restore(const std::string &manifest_id,
         return false;
     }
 
+    // Make the directory entry durable as well.
+    size_t dest_slash = dest.find_last_of('/');
+    std::string dest_dir = dest_slash == std::string::npos
+        ? "." : dest.substr(0, dest_slash);
+    int dir_fd = open(dest_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd >= 0) {
+        if (fsync(dir_fd) != 0) {
+            LOG_WARN("fsync restore directory " + dest_dir + ": " +
+                     strerror(errno));
+        }
+        close(dir_fd);
+    }
+
     LOG_INFO("Restored " + dest + " from manifest " + manifest_id);
     return true;
 }
 
+bool Versioner::restore(const std::string &manifest_id,
+                        const std::string &dest_path_override) const {
+    std::shared_lock<std::shared_mutex> store_lock(
+        manifest_store_.store_mutex());
+    return restore_locked(manifest_id, dest_path_override);
+}
+
 bool Versioner::restore_latest(const std::string &path,
                                const std::string &dest_path) const {
+    std::shared_lock<std::shared_mutex> store_lock(
+        manifest_store_.store_mutex());
     auto history = manifest_store_.get_history(path);
     for (auto it = history.rbegin(); it != history.rend(); ++it) {
         if (manifest_store_.has_manifest(*it))
-            return restore(*it, dest_path);
+            return restore_locked(*it, dest_path);
     }
     LOG_ERROR("No restorable version for " + path);
     return false;
@@ -318,6 +416,10 @@ static void mkdir_p(const std::string &path) {
 
 bool Versioner::restore_snapshot(const Snapshot &snap,
                                  const std::string &dest_root) const {
+    // Hold one shared lock across the whole snapshot: GC must not delete a
+    // later file's manifest after the first file has already been restored.
+    std::shared_lock<std::shared_mutex> store_lock(
+        manifest_store_.store_mutex());
     bool all_ok = true;
     std::string root = snap.root;
     while (root.size() > 1 && root.back() == '/') root.pop_back();
@@ -341,7 +443,7 @@ bool Versioner::restore_snapshot(const Snapshot &snap,
         size_t slash = dest.find_last_of('/');
         if (slash != std::string::npos) mkdir_p(dest.substr(0, slash));
 
-        if (!restore(manifest_id, dest)) {
+        if (!restore_locked(manifest_id, dest)) {
             LOG_ERROR("Snapshot restore failed for " + path);
             all_ok = false;
         }

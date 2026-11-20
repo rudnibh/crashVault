@@ -26,12 +26,24 @@ namespace cv {
 
 class ObjectStore {
 public:
+    enum class WriteResult {
+        Written,  // new chunk durably stored
+        Existed,  // deduplication hit; chunk was already present
+        Error     // I/O failure; the caller must not commit a manifest
+    };
+
     // store_root: the .crashvault directory
     explicit ObjectStore(const std::string &store_root);
 
-    // Write a chunk. Returns true if written, false if already existed (dedup hit).
-    // Thread-safe: multiple workers may call this concurrently — the atomic rename
-    // ensures the final state is correct even if two workers race on the same chunk.
+    // Store a chunk and report exactly what happened (including I/O errors).
+    // Thread-safe: multiple workers may call this concurrently — unique temp
+    // files plus atomic rename make concurrent writes of the same chunk safe.
+    WriteResult put_chunk(const std::string &sha256,
+                          const uint8_t *data, size_t size);
+
+    // Backwards-compatible boolean convenience API for tests/tools:
+    // true = newly written, false = existed or error. Production code uses
+    // put_chunk() so it can distinguish a dedup hit from a real failure.
     bool write_chunk(const std::string &sha256,
                      const uint8_t *data, size_t size);
 
@@ -39,7 +51,7 @@ public:
     bool read_chunk(const std::string &sha256,
                     std::vector<uint8_t> &out);
 
-    // Check if a chunk exists and has the correct size
+    // Check whether a chunk file exists. Use verify_chunk() to re-hash it.
     bool has_chunk(const std::string &sha256) const;
 
     // Verify a chunk: re-hash stored data and compare

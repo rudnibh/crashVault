@@ -84,6 +84,10 @@ private:
                    StatBuf &st_out, VersionResult &result,
                    BufferPool::Lease &read_lease);
 
+    // Caller must already hold a shared lock on ManifestStore::store_mutex().
+    bool restore_locked(const std::string &manifest_id,
+                        const std::string &dest_path_override) const;
+
     const Config    &cfg_;
     ObjectStore     &obj_store_;
     ManifestStore   &manifest_store_;

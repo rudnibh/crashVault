@@ -13,10 +13,10 @@
 // "settled" event when the path has been quiet for debounce_ms milliseconds.
 // This coalesces all events for one save into a single notification.
 //
-// IMPLEMENTATION: A background thread runs every debounce_ms/4 milliseconds,
-// scanning the pending map for paths that have crossed their deadline.
-// The map is protected by a mutex (not a spinlock — the scan thread sleeps
-// most of the time, so contention is low).
+// IMPLEMENTATION: A background thread sleeps on a condition variable until
+// the nearest pending deadline (or until a new event arrives), then emits the
+// paths that have been quiet for debounce_ms. The map is protected by a mutex;
+// the thread sleeps most of the time, so contention is low.
 #pragma once
 #include <string>
 #include <unordered_map>

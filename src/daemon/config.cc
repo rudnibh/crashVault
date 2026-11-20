@@ -14,6 +14,8 @@
 #include <iostream>
 #include <cstdlib>
 #include <climits>
+#include <exception>
+#include <stdexcept>
 
 namespace cv {
 
@@ -42,6 +44,24 @@ static std::vector<std::string> split_csv(const std::string &s) {
         if (!tok.empty()) out.push_back(tok);
     }
     return out;
+}
+
+static int parse_int(const std::string &s) {
+    size_t pos = 0;
+    int v = std::stoi(s, &pos);
+    if (pos != s.size())
+        throw std::invalid_argument("not an integer: " + s);
+    return v;
+}
+
+static size_t parse_megabytes(const std::string &s) {
+    size_t pos = 0;
+    long long mb = std::stoll(s, &pos);
+    if (pos != s.size())
+        throw std::invalid_argument("not an integer: " + s);
+    if (mb < 0 || mb > 1024 * 1024)
+        throw std::out_of_range("megabyte value out of range");
+    return static_cast<size_t>(mb) * 1024 * 1024;
 }
 
 bool Config::load(const std::string &path, std::string &error) {
@@ -85,41 +105,68 @@ bool Config::load(const std::string &path, std::string &error) {
         std::string key = trim(line.substr(0, eq));
         std::string val = strip_comment(trim(line.substr(eq + 1)));
 
-        // [daemon] section
-        if (section == "daemon") {
-            if (key == "worker_count")        worker_count = std::stoi(val);
-            else if (key == "memory_cap_mb")  memory_cap_bytes = (size_t)std::stoul(val) * 1024 * 1024;
-            else if (key == "debounce_ms")    debounce_ms = std::stoi(val);
-            else if (key == "scheduling_policy") scheduling_policy = val;
-            else if (key == "store_root")     store_root = val;
-            else if (key == "mmap_threshold_mb") mmap_threshold_bytes = (size_t)std::stoul(val) * 1024 * 1024;
-            else if (key == "snapshot_quiescence_s") snapshot_quiescence_s = std::stoi(val);
-            else if (key == "gateway_port")   gateway_port = std::stoi(val);
-        }
-        // [retention] section
-        else if (section == "retention") {
-            if (key == "versions")            retention_versions = std::stoi(val);
-            else if (key == "days")           retention_days = std::stoi(val);
-        }
-        // [watch] section — multi-value keys
-        else if (section == "watch") {
-            if (key == "root") {
-                watched_roots.push_back(val);
-            } else if (key == "roots") {
-                auto roots = split_csv(val);
-                watched_roots.insert(watched_roots.end(), roots.begin(), roots.end());
-            } else if (key == "ignore") {
-                ignore_patterns.push_back(val);
-            } else if (key == "ignores") {
-                auto pats = split_csv(val);
-                ignore_patterns.insert(ignore_patterns.end(), pats.begin(), pats.end());
+        try {
+            // [daemon] section
+            if (section == "daemon") {
+                if (key == "worker_count")        worker_count = parse_int(val);
+                else if (key == "memory_cap_mb")  memory_cap_bytes = parse_megabytes(val);
+                else if (key == "debounce_ms")    debounce_ms = parse_int(val);
+                else if (key == "scheduling_policy") scheduling_policy = val;
+                else if (key == "store_root")     store_root = val;
+                else if (key == "mmap_threshold_mb") mmap_threshold_bytes = parse_megabytes(val);
+                else if (key == "snapshot_quiescence_s") snapshot_quiescence_s = parse_int(val);
+                else if (key == "gateway_port")   gateway_port = parse_int(val);
             }
+            // [retention] section
+            else if (section == "retention") {
+                if (key == "versions")            retention_versions = parse_int(val);
+                else if (key == "days")           retention_days = parse_int(val);
+            }
+            // [watch] section — multi-value keys
+            else if (section == "watch") {
+                if (key == "root") {
+                    watched_roots.push_back(val);
+                } else if (key == "roots") {
+                    auto roots = split_csv(val);
+                    watched_roots.insert(watched_roots.end(), roots.begin(), roots.end());
+                } else if (key == "ignore") {
+                    ignore_patterns.push_back(val);
+                } else if (key == "ignores") {
+                    auto pats = split_csv(val);
+                    ignore_patterns.insert(ignore_patterns.end(), pats.begin(), pats.end());
+                }
+            }
+        } catch (const std::exception &e) {
+            error = "Invalid value at line " + std::to_string(lineno) +
+                    " (" + key + " = " + val + "): " + e.what();
+            return false;
         }
     }
 
-    // Validation
+    // Validation. Reject values that would make a subsystem misbehave rather
+    // than silently accepting them and failing later at runtime.
     if (worker_count < 1 || worker_count > 64) {
         error = "worker_count must be 1–64";
+        return false;
+    }
+    if (debounce_ms < 0 || debounce_ms > 600000) {
+        error = "debounce_ms must be between 0 and 600000";
+        return false;
+    }
+    if (memory_cap_bytes < 1024 * 1024) {
+        error = "memory_cap_mb must be at least 1";
+        return false;
+    }
+    if (snapshot_quiescence_s < 0) {
+        error = "snapshot_quiescence_s must be >= 0 (0 disables auto-snapshots)";
+        return false;
+    }
+    if (gateway_port < 0 || gateway_port > 65535) {
+        error = "gateway_port must be 0–65535";
+        return false;
+    }
+    if (scheduling_policy != "fcfs" && scheduling_policy != "priority") {
+        error = "scheduling_policy must be 'fcfs' or 'priority'";
         return false;
     }
     return true;

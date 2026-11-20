@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <csignal>
 #include <atomic>
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
@@ -42,11 +43,12 @@ using json = nlohmann::json;
 namespace {
 
 std::atomic<bool> g_stop{false};
-int g_listen_fd = -1;
+std::atomic<int>  g_listen_fd{-1};
 
 void on_signal(int) {
     g_stop.store(true);
-    if (g_listen_fd >= 0) shutdown(g_listen_fd, SHUT_RDWR);
+    int fd = g_listen_fd.load(std::memory_order_relaxed);
+    if (fd >= 0) shutdown(fd, SHUT_RDWR);
 }
 
 std::string default_socket_path() {
@@ -59,6 +61,7 @@ bool send_all(int fd, const std::string &data) {
     size_t sent = 0;
     while (sent < data.size()) {
         ssize_t n = send(fd, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return false;
         sent += (size_t)n;
     }
@@ -106,7 +109,12 @@ std::string ipc_call(const std::string &socket_path, const json &request) {
 
     std::string response;
     char ch;
-    while (recv(fd, &ch, 1, 0) == 1) {
+    while (true) {
+        ssize_t n;
+        do {
+            n = recv(fd, &ch, 1, 0);
+        } while (n < 0 && errno == EINTR);
+        if (n != 1) break;
         if (ch == '\n') break;
         response += ch;
         if (response.size() > 64 * 1024) break;
@@ -285,7 +293,10 @@ void handle_client(int fd, const std::string &socket_path) {
     char buf[4096];
     while (request.find("\r\n\r\n") == std::string::npos &&
            request.size() < 16384) {
-        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+        ssize_t n;
+        do {
+            n = recv(fd, buf, sizeof(buf), 0);
+        } while (n < 0 && errno == EINTR);
         if (n <= 0) { close(fd); return; }
         request.append(buf, (size_t)n);
     }
@@ -380,6 +391,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    if (port < 0 || port > 65535) {
+        std::cerr << "Invalid port: " << port << "\n";
+        return 1;
+    }
+
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
@@ -401,7 +417,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     if (listen(fd, 32) != 0) { perror("listen"); return 1; }
-    g_listen_fd = fd;
+    g_listen_fd.store(fd, std::memory_order_relaxed);
 
     std::cout << "CrashVault dashboard: http://" << bind_addr << ":" << port
               << "  (daemon socket: " << socket_path << ")\n";
@@ -416,6 +432,6 @@ int main(int argc, char *argv[]) {
     }
 
     close(fd);
-    g_listen_fd = -1;
+    g_listen_fd.store(-1, std::memory_order_relaxed);
     return 0;
 }

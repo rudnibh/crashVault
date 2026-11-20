@@ -51,7 +51,8 @@ struct Config {
     // Load from an INI file; returns false and fills error on parse failure
     bool load(const std::string &path, std::string &error);
 
-    // Reload (called on SIGHUP); thread-safe copy-swap
+    // Reload (called on SIGHUP). The caller must hold the daemon config
+    // mutex because IPC threads may be reading the same Config object.
     bool reload(const std::string &path, std::string &error);
 
     // Print a summary to stderr (for --foreground debugging)

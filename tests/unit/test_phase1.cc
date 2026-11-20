@@ -100,6 +100,48 @@ TEST_CASE("invalid worker_count") {
     CHECK(!err.empty());
 }
 
+TEST_CASE("malformed numeric value is rejected without throwing") {
+    TempDir tmp;
+    fs::path cfg_path = tmp.path / "config.ini";
+    std::ofstream f(cfg_path);
+    f << "[daemon]\nworker_count = not-a-number\n";
+    f.close();
+
+    cv::Config cfg;
+    std::string err;
+    bool ok = cfg.load(cfg_path.string(), err);
+    CHECK(!ok);
+    CHECK(err.find("Invalid value") != std::string::npos);
+}
+
+TEST_CASE("negative megabyte value is rejected") {
+    TempDir tmp;
+    fs::path cfg_path = tmp.path / "config.ini";
+    std::ofstream f(cfg_path);
+    f << "[daemon]\nmemory_cap_mb = -1\n";
+    f.close();
+
+    cv::Config cfg;
+    std::string err;
+    bool ok = cfg.load(cfg_path.string(), err);
+    CHECK(!ok);
+    CHECK(err.find("Invalid value") != std::string::npos);
+}
+
+TEST_CASE("unknown scheduling policy is rejected") {
+    TempDir tmp;
+    fs::path cfg_path = tmp.path / "config.ini";
+    std::ofstream f(cfg_path);
+    f << "[daemon]\nscheduling_policy = random\n";
+    f.close();
+
+    cv::Config cfg;
+    std::string err;
+    bool ok = cfg.load(cfg_path.string(), err);
+    CHECK(!ok);
+    CHECK(err.find("scheduling_policy") != std::string::npos);
+}
+
 TEST_CASE("comments and blank lines ignored") {
     TempDir tmp;
     fs::path cfg_path = tmp.path / "config.ini";

@@ -1,25 +1,25 @@
 // src/store/wal.cc — Write-Ahead Log implementation
 //
-// CRASH SAFETY PROOF for a versioning operation:
+// CRASH SAFETY PROOF for a versioning operation (actual write order):
 //
 //   Timeline:                             Crash here →     Recovery action
 //   ─────────────────────────────────────────────────────────────────────────
-//   1. wal.prepare(seq, chunks)           A                Discard: no manifest
-//   2. obj_store.write_chunk(x) × N       B                Same as A
-//   3. manifest_store.write_manifest(m)   C                Same as A (manifest gone)
-//   4. wal.commit(seq)                    D                Re-write manifest if missing
+//   1. obj_store.put_chunk(x) × N         A                Orphan chunks; no manifest
+//   2. wal.prepare(seq, chunks)           B                Orphan chunks; no manifest
+//   3. manifest_store.write_manifest(m)   C                Finish history if manifest exists
+//   4. wal.commit(seq)                    D                Re-append history (idempotent)
 //   5. manifest_store.append_history(m)   E                Re-append history (idempotent)
 //   6. wal.complete(seq)                  —                Nothing to do
 //
-// At D, the WAL entry is PREPARE+COMMIT. On replay, we detect that the
-// manifest file exists (write_manifest is atomic) but history may not.
-// We re-call append_version(path, manifest_id), which is idempotent because
-// history is serialized under a mutex and we check for duplicates.
+// Chunks are written first because a manifest must never reference a chunk
+// that is not durable. Chunks are content-addressed, so any chunks written
+// before the manifest are harmless orphans and are reclaimed by GC.
 //
-// At B/C, the WAL entry is PREPARE-only. Chunks may exist in the object store,
-// but since they are content-addressed, they are valid data — we just don't
-// have a manifest referencing them yet. The orphaned chunks are reclaimed by
-// GC. We discard the WAL entry.
+// At C, the manifest exists even though the WAL still says PREPARE. Recovery
+// checks for the manifest first and repairs history; it does not discard a
+// manifest that was successfully published. At D/E the entry is COMMIT and
+// history is re-appended idempotently (serialized by a mutex, duplicate
+// manifest IDs are ignored).
 #include "wal.h"
 #include "../daemon/logger.h"
 #include "../daemon/failpoint.h"
@@ -138,9 +138,15 @@ bool Wal::write_entry(const WalEntry &e) const {
     if (fd < 0) return false;
 
     std::string json_line = e.to_json() + "\n";
-    ssize_t w = write(fd, json_line.data(), json_line.size());
-    if (w < 0 || (size_t)w != json_line.size()) {
-        close(fd); unlink(tmp_path.c_str()); return false;
+    size_t written = 0;
+    while (written < json_line.size()) {
+        ssize_t w = write(fd, json_line.data() + written,
+                          json_line.size() - written);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) {
+            close(fd); unlink(tmp_path.c_str()); return false;
+        }
+        written += static_cast<size_t>(w);
     }
 
     // fsync the data
@@ -243,10 +249,13 @@ std::vector<Wal::ReplayEntry> Wal::replay() const {
     struct dirent *ent;
     while ((ent = readdir(dir)) != nullptr) {
         std::string name = ent->d_name;
-        // Only look at .wal files (not .wal.done — those are complete)
+        // Only look at .wal files (not .wal.done — those are complete).
+        // Ignore temp files such as 000...wal.tmp.<pid>.
         if (name.size() < 4) continue;
-        if (name.rfind(".wal") == name.size() - 4 &&
-            name.rfind(".wal.done") != name.size() - 9) {
+        bool is_wal = name.rfind(".wal") == name.size() - 4;
+        bool is_done = name.size() >= 9 &&
+                       name.rfind(".wal.done") == name.size() - 9;
+        if (is_wal && !is_done) {
             pending_paths.push_back(wal_dir_ + "/" + name);
         }
     }
@@ -278,11 +287,15 @@ void Wal::gc(size_t keep_last_n) {
     if (!dir) return;
 
     std::vector<std::string> done_paths;
+    std::vector<std::string> temp_paths;
     struct dirent *ent;
     while ((ent = readdir(dir)) != nullptr) {
         std::string name = ent->d_name;
-        if (name.rfind(".wal.done") == name.size() - 9) {
+        if (name.size() >= 9 &&
+            name.rfind(".wal.done") == name.size() - 9) {
             done_paths.push_back(wal_dir_ + "/" + name);
+        } else if (name.find(".tmp.") != std::string::npos) {
+            temp_paths.push_back(wal_dir_ + "/" + name);
         }
     }
     closedir(dir);
@@ -297,6 +310,22 @@ void Wal::gc(size_t keep_last_n) {
     }
     if (to_remove > 0) {
         LOG_DEBUG("WAL GC: removed " + std::to_string(to_remove) + " completed entries");
+    }
+
+    // Remove stale temp files from a crashed writer. One hour is comfortably
+    // longer than any single WAL write, so a live writer is never touched.
+    time_t now = time(nullptr);
+    size_t temp_removed = 0;
+    for (const auto &path : temp_paths) {
+        struct stat st{};
+        if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+            now - st.st_mtime > 3600) {
+            if (unlink(path.c_str()) == 0) temp_removed++;
+        }
+    }
+    if (temp_removed > 0) {
+        LOG_DEBUG("WAL GC: removed " + std::to_string(temp_removed) +
+                  " stale temp files");
     }
 }
 

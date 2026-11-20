@@ -5,16 +5,18 @@
 // orphaned chunks (wasted space) or, worse, a manifest referencing chunks that
 // were never durably written.
 //
-// Our WAL records every versioning operation in three steps:
-//   1. PREPARE:  all chunks for this operation are enumerated
+// Chunks are written first (a manifest must never point at a non-durable
+// chunk), then the WAL records the operation in three steps:
+//   1. PREPARE:  chunk list for this operation is durable
 //   2. COMMIT:   manifest_id written → operation is "committed" (durable)
 //   3. COMPLETE: manifest & history files written → WAL entry can be GC'd
 //
 // On restart, we replay:
-//   - PREPARE-only entries: chunks may be present but manifest is not → safe to
-//     ignore (chunks are content-addressed; they won't corrupt other manifests)
-//   - PREPARE+COMMIT entries: manifest exists but history may not → re-append
-//     the manifest_id to history (idempotent)
+//   - PREPARE-only, no manifest: discard (content-addressed chunks are safe
+//     orphans and will be reclaimed by GC)
+//   - PREPARE-only, manifest exists: finish the history append (crash between
+//     manifest publication and WAL COMMIT)
+//   - COMMIT: re-append the manifest_id to history (idempotent) then COMPLETE
 //   - COMPLETE entries: nothing to do
 //
 // STRUCTURE:

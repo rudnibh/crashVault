@@ -9,6 +9,7 @@
 #include <vector>
 #include <cstring>
 #include <cstdlib>
+#include <cerrno>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -44,13 +45,19 @@ static std::string send_recv(int fd, const json &req) {
     size_t sent = 0;
     while (sent < msg.size()) {
         ssize_t n = send(fd, msg.data() + sent, msg.size() - sent, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return "";
-        sent += n;
+        sent += (size_t)n;
     }
     // Recv until newline
     std::string resp;
     char ch;
-    while (recv(fd, &ch, 1, 0) == 1) {
+    while (true) {
+        ssize_t n;
+        do {
+            n = recv(fd, &ch, 1, 0);
+        } while (n < 0 && errno == EINTR);
+        if (n != 1) break;
         if (ch == '\n') break;
         resp += ch;
     }
@@ -163,7 +170,17 @@ int main(int argc, char *argv[]) {
 
     if (as_json) {
         std::cout << resp_str << "\n";
-        return 0;
+        // Keep scripting predictable: a daemon-level failure and an unhealthy
+        // verify result are non-zero exits even in machine-readable mode.
+        try {
+            json j = json::parse(resp_str);
+            if (!j.value("ok", false)) return 1;
+            if (cmd == "verify" && j.contains("data") &&
+                !j["data"].value("healthy", true)) return 1;
+            return 0;
+        } catch (...) {
+            return 1;
+        }
     }
 
     // Pretty-print for humans
@@ -244,6 +261,8 @@ int main(int argc, char *argv[]) {
                       << d.value("snapshots_deleted", 0) << "\n";
             std::cout << "  chunks deleted:          "
                       << d.value("chunks_deleted", 0) << "\n";
+            std::cout << "  stale temp files removed:"
+                      << " " << d.value("temp_files_deleted", 0) << "\n";
             std::cout << "  bytes reclaimed:         "
                       << d.value("bytes_reclaimed", (uint64_t)0) << "\n";
         } else if (cmd == "snapshot-now" || cmd == "restore" ||

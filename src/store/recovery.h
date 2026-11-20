@@ -14,13 +14,14 @@ class ManifestStore;
 
 struct RecoveryStats {
     size_t pending   = 0; // WAL entries that needed attention
-    size_t repaired  = 0; // COMMIT entries whose history was re-appended
+    size_t repaired  = 0; // entries whose history was completed/re-appended
     size_t discarded = 0; // PREPARE-only entries safely discarded
     size_t failed    = 0; // entries that could not be repaired
 };
 
 // Replay every incomplete WAL entry:
-//   - PREPARE-only: manifest was never committed → discard
+//   - PREPARE-only, no manifest: discard (chunks are harmless orphans)
+//   - PREPARE-only, manifest exists: finish the history append → complete
 //   - COMMIT without COMPLETE: re-append history (idempotent) → complete
 //   - COMPLETE: should not be returned by Wal::replay()
 RecoveryStats recover_wal(Wal &wal, ManifestStore &manifests);

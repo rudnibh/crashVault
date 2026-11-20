@@ -1,6 +1,6 @@
 # CrashVault — Crash-Consistent Versioning and Recovery Service
 
-A lightweight Linux daemon that watches user-selected folders, stores deduplicated versions of every changed file, groups related changes into consistent project-level snapshots, and automatically detects corruption and restores the last valid state after a crash.
+A lightweight Linux daemon that watches user-selected folders, stores deduplicated versions of every changed file, groups related changes into consistent project-level snapshots, recovers the last committed state after a crash, and verifies stored data for corruption.
 
 ## Why This Exists
 
@@ -179,8 +179,10 @@ On startup the daemon replays every `.wal` entry:
 | COMMIT | re-append history idempotently, then COMPLETE |
 | COMPLETE | not replayed |
 
-`cvctl verify` re-hashes every chunk and checks every history reference;
-`cvctl gc` enforces retention and removes unreferenced manifests/chunks.
+`cvctl verify` re-hashes every chunk, checks history references, and validates
+snapshot references. `cvctl restore` also re-hashes each chunk while rebuilding
+a file, so corrupt data is never silently restored. `cvctl gc` enforces
+retention and removes unreferenced manifests/chunks plus stale temp files.
 
 ## Build Variants
 
@@ -207,18 +209,25 @@ cmake --build build-release -j$(nproc)
 | `SIGINT` | Same as SIGTERM (foreground only) |
 | `SIGHUP` | Reload config file |
 
-The daemon handles signals via the **self-pipe trick**: the signal handler writes one byte to a non-blocking pipe; the event loop reads it via epoll. This keeps all signal handling 100% async-signal-safe.
+The daemon handles signals via the **self-pipe trick**: the signal handler writes one byte to a non-blocking pipe; the main loop waits on that pipe with `poll(2)` and drains it in normal thread context. This keeps all signal handling async-signal-safe and makes shutdown immediate instead of waiting for a sleep tick.
 
 ## Limitations
 
 1. **Advisory locking only**: `flock(2)` is advisory. A process that doesn't call `flock` can still write concurrently. CrashVault cannot protect against non-cooperating writers.
-2. **Linux only**: Uses inotify, epoll, eventfd, and signalfd — all Linux-specific. WSL2 `/mnt/c` paths use 9P filesystem which does not support inotify; run on a native Linux filesystem (ext4, btrfs, xfs).
+2. **Linux only**: Uses inotify, epoll, eventfd, and POSIX signals — all Linux-specific. WSL2 `/mnt/c` paths use a 9P filesystem which does not support inotify; run on a native Linux filesystem (ext4, btrfs, xfs).
 3. **No encryption**: Stored chunks are unencrypted. For sensitive data, encrypt the store root (e.g., use an encrypted filesystem).
 4. **No cross-machine sync**: CrashVault is single-machine only.
 5. **No hard links or special files**: Only regular files are versioned.
 6. **inotify watch limit**: The kernel defaults to 8192 or 65536 watches. For large trees, raise it: `echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches`.
 7. **Dashboard has no authentication**: `web_gateway` binds to `127.0.0.1` by default. Do not expose it on a public interface.
 8. **Failpoints are debug-only**: `CV_FAILPOINT` crash injection is compiled out in `Release` builds.
+9. **Some settings need a restart**: `SIGHUP` hot-reloads the scheduling policy, retention limits, and snapshot quiescence window. Changing watched roots, ignore patterns, worker count, memory cap, debounce window, store root, or gateway port requires restarting the daemon because those values are baked into threads, watchers, and buffer pools at startup.
+
+## Evaluation / Viva
+
+See [`docs/VIVA_DEMO_GUIDE.md`](docs/VIVA_DEMO_GUIDE.md) for a repeatable
+10-minute demo, a 2-minute short demo, code walkthrough map, and likely viva
+questions with answers.
 
 ## CI
 

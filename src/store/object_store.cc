@@ -10,12 +10,24 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <sstream>
 #include <thread>
+#include <vector>
 #include <functional>
 
 namespace cv {
+
+static bool valid_sha256_id(const std::string &s) {
+    if (s.size() != 64) return false;
+    for (char c : s) {
+        bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                   (c >= 'A' && c <= 'F');
+        if (!hex) return false;
+    }
+    return true;
+}
 
 ObjectStore::ObjectStore(const std::string &store_root)
     : store_root_(store_root)
@@ -31,6 +43,7 @@ std::string ObjectStore::chunk_path(const std::string &sha256) const {
     // potentially millions of entries, slowing readdir/stat significantly.
     // Sharding by first 2 hex chars gives 256 directories, capping entries
     // per directory at ~N/256 (e.g. 100K chunks → ~390 per shard).
+    if (sha256.size() < 2) return {};
     return objects_root_ + "/" + sha256.substr(0, 2) + "/" + sha256.substr(2);
 }
 
@@ -44,43 +57,63 @@ bool ObjectStore::ensure_shard_dir(const std::string &sha256) const {
 }
 
 bool ObjectStore::has_chunk(const std::string &sha256) const {
+    if (!valid_sha256_id(sha256)) return false;
     return access(chunk_path(sha256).c_str(), F_OK) == 0;
 }
 
 bool ObjectStore::write_chunk(const std::string &sha256,
                               const uint8_t *data, size_t size) {
-    // Fast path: chunk already exists (dedup hit — no I/O needed)
-    if (has_chunk(sha256)) return false;
+    return put_chunk(sha256, data, size) == WriteResult::Written;
+}
 
-    if (!ensure_shard_dir(sha256)) return false;
+ObjectStore::WriteResult ObjectStore::put_chunk(const std::string &sha256,
+                                                const uint8_t *data,
+                                                size_t size) {
+    if (!valid_sha256_id(sha256)) return WriteResult::Error;
+
+    // Fast path: chunk already exists (dedup hit — no I/O needed)
+    if (has_chunk(sha256)) return WriteResult::Existed;
+
+    if (!ensure_shard_dir(sha256)) return WriteResult::Error;
 
     std::string final_path = chunk_path(sha256);
     // Temp file in the same directory (same filesystem = atomic rename possible).
-    // Include the thread id: two workers can race on the same chunk, and a
-    // pid-only temp name would make one of them mistake the other's in-progress
-    // temp file for a completed chunk (and then reference a chunk that may
-    // never be renamed into place if that writer fails).
-    std::string tmp_path = final_path + ".tmp." + std::to_string(getpid()) +
-                           "." + std::to_string(
-                               std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    // mkstemp gives every writer (including concurrent workers and a restarted
+    // process that reuses a PID) a unique name, so a stale temp file can never
+    // be mistaken for an in-progress chunk.
+    std::string tmp_template = final_path + ".tmp.XXXXXX";
+    std::vector<char> tmp_buf(tmp_template.begin(), tmp_template.end());
+    tmp_buf.push_back('\0');
+    int fd = mkstemp(tmp_buf.data());
+    if (fd < 0) {
+        LOG_ERROR("mkstemp for chunk " + sha256 + ": " + strerror(errno));
+        return WriteResult::Error;
+    }
+    std::string tmp_path(tmp_buf.data());
+    int fd_flags = fcntl(fd, F_GETFD);
+    if (fd_flags >= 0) fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC);
 
     // ── Step 1: Write to temp file ────────────────────────────────────────────
-    // O_EXCL: fail if temp file already exists (avoid stomping concurrent write)
-    // O_CLOEXEC: don't leak fd to child processes
-    int fd = open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0444);
-    if (fd < 0) {
-        // Another worker may be writing the same chunk concurrently — that's fine
-        if (errno == EEXIST) return false;
-        LOG_ERROR("open tmp " + tmp_path + ": " + strerror(errno));
-        return false;
+    size_t written = 0;
+    while (written < size) {
+        ssize_t n = write(fd, data + written, size - written);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            LOG_ERROR("write chunk " + sha256 + ": " + strerror(errno));
+            close(fd);
+            unlink(tmp_path.c_str());
+            return WriteResult::Error;
+        }
+        written += static_cast<size_t>(n);
     }
 
-    ssize_t written = write(fd, data, size);
-    if (written < 0 || (size_t)written != size) {
-        LOG_ERROR("write chunk " + sha256 + ": " + strerror(errno));
+    // Chunks are immutable once published: make the file read-only. fchmod
+    // happens before fsync so both data and mode are durable.
+    if (fchmod(fd, 0444) != 0) {
+        LOG_ERROR("chmod chunk " + sha256 + ": " + strerror(errno));
         close(fd);
         unlink(tmp_path.c_str());
-        return false;
+        return WriteResult::Error;
     }
 
     CV_FAILPOINT("object_after_write");
@@ -93,7 +126,7 @@ bool ObjectStore::write_chunk(const std::string &sha256,
         LOG_ERROR("fsync chunk " + sha256 + ": " + strerror(errno));
         close(fd);
         unlink(tmp_path.c_str());
-        return false;
+        return WriteResult::Error;
     }
     close(fd);
 
@@ -106,7 +139,7 @@ bool ObjectStore::write_chunk(const std::string &sha256,
     if (rename(tmp_path.c_str(), final_path.c_str()) != 0) {
         LOG_ERROR("rename chunk " + sha256 + ": " + strerror(errno));
         unlink(tmp_path.c_str());
-        return false;
+        return WriteResult::Error;
     }
 
     CV_FAILPOINT("object_after_rename");
@@ -124,11 +157,12 @@ bool ObjectStore::write_chunk(const std::string &sha256,
 
     LOG_DEBUG("Stored chunk " + sha256.substr(0, 16) + "... (" +
               std::to_string(size) + " bytes)");
-    return true;
+    return WriteResult::Written;
 }
 
 bool ObjectStore::read_chunk(const std::string &sha256,
                              std::vector<uint8_t> &out) {
+    if (!valid_sha256_id(sha256)) return false;
     std::string path = chunk_path(sha256);
     int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) return false;
@@ -137,13 +171,26 @@ bool ObjectStore::read_chunk(const std::string &sha256,
     if (fstat(fd, &st) != 0) { close(fd); return false; }
 
     out.resize(static_cast<size_t>(st.st_size));
-    ssize_t n = read(fd, out.data(), out.size());
+    size_t got = 0;
+    while (got < out.size()) {
+        ssize_t n = read(fd, out.data() + got, out.size() - got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); out.clear(); return false; }
+        got += static_cast<size_t>(n);
+    }
     close(fd);
-    if (n < 0 || (size_t)n != out.size()) return false;
+
+    // Restore must never silently emit corrupted bytes. Re-hash on read so a
+    // damaged object is treated exactly like a missing one.
+    if (sha256_hex(out.data(), out.size()) != sha256) {
+        out.clear();
+        return false;
+    }
     return true;
 }
 
 bool ObjectStore::verify_chunk(const std::string &sha256) const {
+    if (!valid_sha256_id(sha256)) return false;
     std::string path = chunk_path(sha256);
     int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) return false;
@@ -152,9 +199,14 @@ bool ObjectStore::verify_chunk(const std::string &sha256) const {
     if (fstat(fd, &st) != 0) { close(fd); return false; }
 
     std::vector<uint8_t> data(static_cast<size_t>(st.st_size));
-    ssize_t n = read(fd, data.data(), data.size());
+    size_t got = 0;
+    while (got < data.size()) {
+        ssize_t n = read(fd, data.data() + got, data.size() - got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); return false; }
+        got += static_cast<size_t>(n);
+    }
     close(fd);
-    if (n < 0 || (size_t)n != data.size()) return false;
 
     std::string actual = sha256_hex(data.data(), data.size());
     return actual == sha256;

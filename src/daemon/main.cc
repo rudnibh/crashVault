@@ -41,12 +41,16 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <poll.h>
 #include <memory>
 #include <chrono>
 #include <thread>
 #include <atomic>
 #include <ctime>
 #include <functional>
+#include <mutex>
+#include <vector>
+#include <cerrno>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -61,6 +65,10 @@ namespace {
     std::atomic<int64_t>  g_last_event_epoch{0};
     std::string           g_config_path;
     cv::Config            g_config;
+    // Config is read by IPC handler threads and written by SIGHUP reload on
+    // the main thread. A mutex keeps those accesses race-free; workers keep
+    // their own immutable copies of the settings they need.
+    std::mutex            g_config_mutex;
 }
 
 // Everything the IPC command handler needs. Keeping this explicit avoids
@@ -74,6 +82,7 @@ struct IpcContext {
     cv::Versioner      *versioner  = nullptr;
     cv::Wal            *wal        = nullptr;
     cv::Config         *config     = nullptr;
+    std::mutex         *config_mu  = nullptr;
 };
 
 static json manifest_summary(const cv::Manifest &m) {
@@ -134,6 +143,15 @@ static std::string handle_ipc(const std::string &req_str, IpcContext &ctx) {
         json req = json::parse(req_str);
         std::string cmd = req.value("cmd", "");
 
+        // Take a consistent snapshot of mutable configuration. The daemon may
+        // reload it concurrently on SIGHUP, so never read g_config directly
+        // from an IPC worker thread.
+        cv::Config cfg;
+        {
+            std::lock_guard<std::mutex> lk(*ctx.config_mu);
+            cfg = *ctx.config;
+        }
+
         if (cmd == "status") {
             resp["ok"] = true;
             resp["data"] = {
@@ -143,7 +161,7 @@ static std::string handle_ipc(const std::string &req_str, IpcContext &ctx) {
                 {"queue_capacity",   ctx.queue->capacity()},
                 {"active_workers",   ctx.pool->active_workers()},
                 {"watch_count",      ctx.watcher->watch_count()},
-                {"policy",           ctx.config->scheduling_policy},
+                {"policy",           cfg.scheduling_policy},
                 {"daemon_pid",       (int)getpid()},
                 {"tracked_files",    ctx.manifests->list_history_paths().size()},
                 {"manifests",        ctx.manifests->list_manifest_ids().size()},
@@ -151,7 +169,7 @@ static std::string handle_ipc(const std::string &req_str, IpcContext &ctx) {
                 {"pending_wal",      ctx.wal->replay().size()},
                 {"read_budget_in_use",    ctx.versioner->read_budget_in_use()},
                 {"read_budget_capacity",  ctx.versioner->read_budget_capacity()},
-                {"store_root",       ctx.config->store_root}
+                {"store_root",       cfg.store_root}
             };
         } else if (cmd == "shutdown") {
             cv::g_shutdown_requested.store(true);
@@ -167,7 +185,10 @@ static std::string handle_ipc(const std::string &req_str, IpcContext &ctx) {
                 resp["error"] = "policy must be 'fcfs' or 'priority'";
             } else {
                 ctx.queue->set_policy(policy);
-                ctx.config->scheduling_policy = policy;
+                {
+                    std::lock_guard<std::mutex> lk(*ctx.config_mu);
+                    ctx.config->scheduling_policy = policy;
+                }
                 resp["ok"] = true;
                 resp["msg"] = "policy set to " + policy;
             }
@@ -224,8 +245,8 @@ static std::string handle_ipc(const std::string &req_str, IpcContext &ctx) {
             resp["data"] = {{"snapshots", snaps}, {"count", snaps.size()}};
         } else if (cmd == "snapshot-now") {
             std::string root = req.value("root", "");
-            if (root.empty() && !ctx.config->watched_roots.empty())
-                root = ctx.config->watched_roots.front();
+            if (root.empty() && !cfg.watched_roots.empty())
+                root = cfg.watched_roots.front();
             cv::Snapshot snap;
             if (!ctx.manifests->create_snapshot(root, snap)) {
                 resp["ok"] = false;
@@ -309,14 +330,15 @@ static std::string handle_ipc(const std::string &req_str, IpcContext &ctx) {
             };
         } else if (cmd == "gc") {
             auto stats = cv::run_gc(*ctx.manifests, *ctx.objects,
-                                    ctx.config->retention_versions,
-                                    ctx.config->retention_days);
+                                    cfg.retention_versions,
+                                    cfg.retention_days);
             resp["ok"] = true;
             resp["data"] = {
                 {"history_entries_trimmed", stats.history_entries_trimmed},
                 {"manifests_deleted",       stats.manifests_deleted},
                 {"snapshots_deleted",       stats.snapshots_deleted},
                 {"chunks_deleted",          stats.chunks_deleted},
+                {"temp_files_deleted",      stats.temp_files_deleted},
                 {"bytes_reclaimed",         stats.bytes_reclaimed}
             };
         } else if (cmd == "simulate-crash") {
@@ -421,8 +443,6 @@ int main(int argc, char *argv[]) {
         LOG_ERROR(std::string("signal_handler_init: ") + e.what());
         return 1;
     }
-    (void)sig_pipe_read; // used by epoll in a future phase; signal flags checked in loop
-
     // Create bounded queue
     // Queue capacity: heuristically, 2× worker count per watched root, min 64
     size_t q_cap = std::max((size_t)64,
@@ -522,6 +542,7 @@ int main(int argc, char *argv[]) {
     ipc_ctx.versioner = versioner.get();
     ipc_ctx.wal       = wal.get();
     ipc_ctx.config    = &g_config;
+    ipc_ctx.config_mu = &g_config_mutex;
 
     std::string sock_path = g_config.store_root + "/crashvaultd.sock";
     auto ipc = std::make_unique<cv::SocketServer>(
@@ -534,10 +555,9 @@ int main(int argc, char *argv[]) {
     // Start all subsystems
     try {
         debouncer->start();
+        // start() installs watches for every root supplied to the constructor;
+        // adding them again from this thread would race with the event loop.
         watcher->start();
-        for (auto &root : g_config.watched_roots) {
-            watcher->add_root(root);
-        }
         pool.start();
         ipc->start();
     } catch (const std::exception &e) {
@@ -551,39 +571,105 @@ int main(int argc, char *argv[]) {
              std::to_string(g_config.watched_roots.size()) + " root(s).");
 
     // ── MAIN LOOP ─────────────────────────────────────────────────────────────
-    // Block here until SIGTERM/SIGINT sets g_shutdown_requested.
-    // The main thread only handles signals and quiescence snapshots; keeping
-    // it on a 100 ms tick avoids adding another epoll thread for two flags.
+    // Sleep in poll(2) on the self-pipe read end. A signal wakes us
+    // immediately; the 100 ms timeout drives quiescence-snapshot checks.
     int64_t last_snapshot_epoch = 0;
+    struct pollfd sig_pfd{};
+    sig_pfd.fd     = sig_pipe_read;
+    sig_pfd.events = POLLIN;
+
     while (!cv::g_shutdown_requested.load()) {
-        // Handle SIGHUP: reload config
+        int poll_rc = poll(&sig_pfd, 1, 100);
+        if (poll_rc > 0) {
+            if (sig_pfd.revents & POLLIN) cv::signal_handler_drain();
+            // POLLERR/POLLHUP should not busy-loop if it ever happens.
+            else std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } else if (poll_rc < 0 && errno != EINTR) {
+            // A persistent poll error must not turn this into a busy loop.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (cv::g_shutdown_requested.load()) break;
+
+        // Handle SIGHUP: reload policy/retention settings. Watched roots and
+        // ignore patterns are baked into the running watcher, so keep the old
+        // values until restart rather than reporting a configuration that is
+        // not actually in effect.
         if (cv::g_reload_requested.exchange(false)) {
             LOG_INFO("SIGHUP received — reloading config");
             std::string err;
-            if (!g_config.reload(g_config_path, err)) {
+            std::string new_policy;
+            bool reload_ok = false;
+            bool restart_needed = false;
+            {
+                std::lock_guard<std::mutex> lk(g_config_mutex);
+                cv::Config old = g_config;
+                reload_ok = g_config.reload(g_config_path, err);
+                if (reload_ok) {
+                    new_policy = g_config.scheduling_policy;
+
+                    // Hot-reloadable: scheduling policy, retention, and the
+                    // quiescence window (the main loop copies it every tick).
+                    // Everything else is baked into already-created threads or
+                    // buffer pools; keep the running values and ask for a
+                    // restart instead of reporting settings that are not live.
+                    if (g_config.watched_roots != old.watched_roots) {
+                        g_config.watched_roots = old.watched_roots;
+                        restart_needed = true;
+                    }
+                    if (g_config.ignore_patterns != old.ignore_patterns) {
+                        g_config.ignore_patterns = old.ignore_patterns;
+                        restart_needed = true;
+                    }
+                    if (g_config.worker_count != old.worker_count ||
+                        g_config.memory_cap_bytes != old.memory_cap_bytes ||
+                        g_config.debounce_ms != old.debounce_ms ||
+                        g_config.store_root != old.store_root ||
+                        g_config.mmap_threshold_bytes != old.mmap_threshold_bytes ||
+                        g_config.gateway_port != old.gateway_port) {
+                        g_config.worker_count         = old.worker_count;
+                        g_config.memory_cap_bytes     = old.memory_cap_bytes;
+                        g_config.debounce_ms          = old.debounce_ms;
+                        g_config.store_root           = old.store_root;
+                        g_config.mmap_threshold_bytes = old.mmap_threshold_bytes;
+                        g_config.gateway_port         = old.gateway_port;
+                        restart_needed = true;
+                    }
+                }
+            }
+            if (!reload_ok) {
                 LOG_WARN("Config reload failed: " + err);
             } else {
-                LOG_INFO("Config reloaded");
-                queue.set_policy(g_config.scheduling_policy);
+                queue.set_policy(new_policy);
+                LOG_INFO("Config reloaded (policy=" + new_policy + ")");
+                if (restart_needed) {
+                    LOG_WARN("Some changed settings require a restart; the "
+                             "running values are unchanged");
+                }
             }
+        }
+
+        cv::Config cfg;
+        {
+            std::lock_guard<std::mutex> lk(g_config_mutex);
+            cfg = g_config;
         }
 
         // Automatic quiescence snapshots: once writes have stopped for
         // snapshot_quiescence_s, capture a consistent project-level snapshot.
-        if (g_config.snapshot_quiescence_s > 0 && g_snapshot_dirty.load()) {
+        if (cfg.snapshot_quiescence_s > 0 && g_snapshot_dirty.load()) {
             int64_t now      = (int64_t)time(nullptr);
             int64_t last_ev  = g_last_event_epoch.load();
             int64_t quiet    = now - last_ev;
-            if (quiet >= g_config.snapshot_quiescence_s &&
-                now - last_snapshot_epoch >= g_config.snapshot_quiescence_s) {
-                if (g_config.watched_roots.empty()) {
+            if (quiet >= cfg.snapshot_quiescence_s &&
+                now - last_snapshot_epoch >= cfg.snapshot_quiescence_s) {
+                if (cfg.watched_roots.empty()) {
                     cv::Snapshot snap;
                     if (manifest_store->create_snapshot("", snap)) {
                         LOG_INFO("Auto-snapshot " + snap.id + " (" +
                                  std::to_string(snap.files.size()) + " files)");
                     }
                 } else {
-                    for (const auto &root : g_config.watched_roots) {
+                    for (const auto &root : cfg.watched_roots) {
                         cv::Snapshot snap;
                         if (manifest_store->create_snapshot(root, snap)) {
                             LOG_INFO("Auto-snapshot " + snap.id + " for " + root +
@@ -596,8 +682,6 @@ int main(int argc, char *argv[]) {
                 last_snapshot_epoch = now;
             }
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     // ─────────────────────────────────────────────────────────────────────────
 

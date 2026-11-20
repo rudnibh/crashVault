@@ -29,10 +29,16 @@ void SocketServer::start() {
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
+    if (socket_path_.size() >= sizeof(addr.sun_path)) {
+        close(server_fd_);
+        server_fd_ = -1;
+        throw std::runtime_error("IPC socket path is too long: " + socket_path_);
+    }
     strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);
 
     if (bind(server_fd_, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
         close(server_fd_);
+        server_fd_ = -1;
         throw std::runtime_error(std::string("bind: ") + strerror(errno));
     }
 
@@ -42,6 +48,7 @@ void SocketServer::start() {
 
     if (listen(server_fd_, 16) != 0) {
         close(server_fd_);
+        server_fd_ = -1;
         throw std::runtime_error(std::string("listen: ") + strerror(errno));
     }
 
@@ -52,13 +59,16 @@ void SocketServer::start() {
 
 void SocketServer::stop() {
     if (!running_.exchange(false)) return;
-    // Close server fd to unblock accept()
-    if (server_fd_ >= 0) {
-        shutdown(server_fd_, SHUT_RDWR);
-        close(server_fd_);
-        server_fd_ = -1;
-    }
+
+    // shutdown() wakes a blocked accept() without invalidating the fd. Keep
+    // the fd open until the server thread has joined, otherwise another thread
+    // could open a file and reuse the same descriptor number while accept()
+    // is still using it.
+    int fd = server_fd_;
+    if (fd >= 0) shutdown(fd, SHUT_RDWR);
     if (thread_.joinable()) thread_.join();
+    if (fd >= 0) close(fd);
+    server_fd_ = -1;
     unlink(socket_path_.c_str());
 }
 
@@ -66,7 +76,8 @@ void SocketServer::serve_loop() {
     while (running_.load()) {
         int client_fd = accept(server_fd_, nullptr, nullptr);
         if (client_fd < 0) {
-            if (errno == EINVAL || errno == EBADF) break; // server_fd closed
+            if (errno == EINVAL || errno == EBADF || errno == ECONNABORTED)
+                break; // server shutdown
             if (errno == EINTR) continue;
             LOG_WARN(std::string("accept: ") + strerror(errno));
             continue;
@@ -88,7 +99,10 @@ void SocketServer::handle_client(int client_fd) {
     request.reserve(256);
     char ch;
     while ((int)request.size() < 65536) {
-        ssize_t n = recv(client_fd, &ch, 1, 0);
+        ssize_t n;
+        do {
+            n = recv(client_fd, &ch, 1, 0);
+        } while (n < 0 && errno == EINTR);
         if (n <= 0) return;
         if (ch == '\n') break;
         request += ch;
@@ -103,8 +117,9 @@ void SocketServer::handle_client(int client_fd) {
     while (written < response.size()) {
         ssize_t n = send(client_fd, response.data() + written,
                          response.size() - written, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return;
-        written += n;
+        written += (size_t)n;
     }
 }
 

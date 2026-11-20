@@ -8,8 +8,8 @@
 // SAFETY RULES:
 //   1. A manifest is kept if any file history or snapshot still references it.
 //   2. A chunk is kept if any surviving manifest references it.
-//   3. Only regular chunk/manifest/snapshot files are removed; temp files are
-//      ignored (they are reclaimed by the next GC run).
+//   3. Only regular chunk/manifest/snapshot files and stale (>1 hour) temp
+//      files from crashed writers are removed.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +24,7 @@ struct GcStats {
     size_t   manifests_deleted       = 0;
     size_t   snapshots_deleted       = 0;
     size_t   chunks_deleted          = 0;
+    size_t   temp_files_deleted      = 0;
     uint64_t bytes_reclaimed         = 0;
 };
 

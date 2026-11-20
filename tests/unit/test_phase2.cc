@@ -25,6 +25,7 @@
 #include <atomic>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utime.h>
 
 namespace fs = std::filesystem;
 
@@ -284,6 +285,11 @@ TEST_CASE("verify_chunk: correct chunk passes, corrupted fails") {
 
     CHECK(store.verify_chunk(sha));
 
+    // Chunks are immutable once published.
+    struct stat st{};
+    REQUIRE(::stat(store.chunk_path(sha).c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0444);
+
     // Corrupt the chunk file (must chmod first — chunks are stored read-only 0444)
     std::string cpath = store.chunk_path(sha);
     ::chmod(cpath.c_str(), 0644);
@@ -292,6 +298,19 @@ TEST_CASE("verify_chunk: correct chunk passes, corrupted fails") {
     f.close();
 
     CHECK(!store.verify_chunk(sha)); // should fail — hash mismatch
+    std::vector<uint8_t> corrupt_out;
+    CHECK(!store.read_chunk(sha, corrupt_out)); // restore must reject corrupt data
+    fs::remove_all(tmpdir);
+}
+
+TEST_CASE("malformed chunk id is rejected without throwing") {
+    auto tmpdir = make_tmpdir();
+    cv::ObjectStore obj(tmpdir);
+    std::vector<uint8_t> out;
+    CHECK(!obj.read_chunk("short", out));
+    CHECK(!obj.verify_chunk("short"));
+    CHECK(!obj.has_chunk("short"));
+    CHECK(obj.put_chunk("short", nullptr, 0) == cv::ObjectStore::WriteResult::Error);
     fs::remove_all(tmpdir);
 }
 
@@ -889,6 +908,22 @@ TEST_CASE("verify_all detects a corrupted chunk") {
     fs::remove_all(tmpdir);
 }
 
+TEST_CASE("verify_all detects corrupt history JSON") {
+    auto tmpdir = make_tmpdir();
+    cv::ManifestStore ms(tmpdir);
+    write_file(tmpdir + "/meta/file_history.json", "{ not valid json");
+
+    auto problems = ms.verify_all(tmpdir + "/objects");
+    CHECK(!problems.empty());
+    bool found = false;
+    for (const auto &p : problems) {
+        if (p.find("history") != std::string::npos) found = true;
+    }
+    CHECK(found);
+
+    fs::remove_all(tmpdir);
+}
+
 TEST_CASE("delete_manifest removes it from disk") {
     auto tmpdir = make_tmpdir();
     cv::ManifestStore ms(tmpdir);
@@ -986,6 +1021,29 @@ TEST_CASE("GC keeps manifests referenced by a snapshot") {
     fs::remove_all(watchdir);
 }
 
+TEST_CASE("GC removes stale metadata temp files") {
+    auto storedir = make_tmpdir();
+    cv::ObjectStore   obj(storedir);
+    cv::ManifestStore ms(storedir);
+
+    std::vector<std::string> temps = {
+        storedir + "/manifests/orphan.json.tmp.ABCDEF",
+        storedir + "/snapshots/orphan.json.tmp.ABCDEF",
+        storedir + "/meta/file_history.json.tmp.ABCDEF"
+    };
+    for (const auto &p : temps) write_file(p, "partial");
+
+    struct utimbuf old{};
+    old.actime = old.modtime = time(nullptr) - 7200;
+    for (const auto &p : temps) REQUIRE(utime(p.c_str(), &old) == 0);
+
+    auto stats = cv::run_gc(ms, obj, 10, 30);
+    CHECK(stats.temp_files_deleted == temps.size());
+    for (const auto &p : temps) CHECK(!fs::exists(p));
+
+    fs::remove_all(storedir);
+}
+
 TEST_CASE("restore_snapshot writes an isolated copy") {
     auto storedir = make_tmpdir();
     auto watchdir = make_tmpdir();
@@ -1056,6 +1114,50 @@ TEST_CASE("failpoint_enabled reads CV_FAILPOINT") {
     CHECK(cv::failpoint_enabled("wal_after_commit"));
     CHECK(!cv::failpoint_enabled("wal_after_prepare"));
     unsetenv("CV_FAILPOINT");
+}
+
+TEST_CASE("GC and versioning are serialized by the store gate") {
+    auto storedir = make_tmpdir();
+    auto watchdir = make_tmpdir();
+    cv::Config cfg = make_store_config(storedir, watchdir);
+    cv::log_init("", cv::LogLevel::ERROR, false);
+
+    cv::ObjectStore   obj(storedir);
+    cv::ManifestStore ms(storedir);
+    cv::Wal           wal(storedir);
+    cv::Versioner     v(cfg, obj, ms, wal);
+
+    std::string path = watchdir + "/concurrent.bin";
+    std::atomic<bool> stop{false};
+    std::atomic<int>  gc_runs{0};
+
+    std::thread gc_thread([&] {
+        while (!stop.load()) {
+            cv::run_gc(ms, obj, 2, 30);
+            gc_runs.fetch_add(1);
+        }
+    });
+
+    // Give the GC thread a chance to enter its loop before the
+    // versioning workload starts, so the test really overlaps them.
+    for (int i = 0; i < 1000 && gc_runs.load() == 0; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    int failures = 0;
+    for (int i = 0; i < 20; i++) {
+        write_file(path, std::to_string(i) + random_bytes(128 * 1024));
+        auto r = v.process(path, false);
+        if (r.status != cv::VersionResult::Status::OK) failures++;
+    }
+    stop.store(true);
+    gc_thread.join();
+
+    CHECK(failures == 0);
+    CHECK(gc_runs.load() > 0);
+    CHECK(ms.verify_all(obj.objects_root()).empty());
+
+    fs::remove_all(storedir);
+    fs::remove_all(watchdir);
 }
 
 } // TEST_SUITE GC and snapshot restore

@@ -34,7 +34,7 @@ CrashVault is a Linux daemon that continuously versions files in watched directo
 ## 3. Thread Model
 
 ```
-Thread 0: main (blocked in sleep loop, handles SIGHUP, shuts down)
+Thread 0: main (blocked in poll(2) on the self-pipe; handles SIGHUP and shutdown)
 Thread 1: InotifyWatcher::event_loop (blocked in epoll_wait)
 Thread 2: Debouncer::scan_loop (blocked in condvar::wait_until)
 Thread 3: SocketServer::serve_loop (blocked in accept)
@@ -45,9 +45,16 @@ Threads 4–N+3: WorkerPool workers (blocked in BoundedQueue::pop)
 ```
 Lock 1: BoundedQueue::mutex_   (guards queue_)
 Lock 2: Debouncer::mu_         (guards pending_)
+Lock 3: config mutex           (guards runtime reload vs. IPC config reads)
+Lock 4: ManifestStore::store_mutex_  (shared: version/restore/verify; exclusive: GC/snapshot)
+Lock 5: history mutex          (guards meta/file_history.json)
 ```
 
-No code path holds Lock 2 while acquiring Lock 1, or vice versa. These are independent monitors with no nesting. **Deadlock is impossible** between these two locks.
+No code path holds Lock 2 while acquiring Lock 1, or vice versa. These are
+independent monitors with no nesting. The config mutex is only held briefly to
+copy or update a `Config` value and is never held while calling queue/worker/
+store code. Store code always takes the store gate before the history mutex,
+never the reverse. **Deadlock is impossible** between these locks.
 
 The watcher thread calls `debouncer->push()`, which acquires Lock 2. It never acquires Lock 1.
 The debouncer thread calls `queue.push()`, which acquires Lock 1. It never acquires Lock 2.
@@ -241,6 +248,13 @@ snapshots, deletes unreferenced manifests, and finally sweeps object-store
 chunks not referenced by any surviving manifest. Content-addressed orphans from
 interrupted writes are reclaimed here, which is safe because no manifest points
 at them.
+
+GC takes the **exclusive** side of `ManifestStore::store_mutex()`. Versioning,
+restore, and verification hold the shared side. This closes a subtle race:
+without the gate, GC could scan the reference set after a worker wrote a chunk
+but before it committed the manifest, and delete that chunk. Snapshot creation
+also takes the exclusive side so every path in a snapshot reflects the same
+point in time. Stale temp files older than one hour are removed as well.
 
 ## 11. Web Gateway
 

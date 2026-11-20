@@ -118,13 +118,29 @@ ManifestStore::ManifestStore(const std::string &store_root)
 // Write a JSON file using temp + fsync + rename (same crash-safe pattern as chunks)
 bool ManifestStore::write_json_file(const std::string &path,
                                      const std::string &json_content) const {
-    std::string tmp = path + ".tmp." + std::to_string(getpid());
-
-    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    // Unique temp path: history writes are serialized, but manifests and
+    // snapshots may be written concurrently. mkstemp also protects against
+    // stale temp files left by a previous process that had the same PID.
+    std::string tmp_template = path + ".tmp.XXXXXX";
+    std::vector<char> tmp_buf(tmp_template.begin(), tmp_template.end());
+    tmp_buf.push_back('\0');
+    int fd = mkstemp(tmp_buf.data());
     if (fd < 0) return false;
+    std::string tmp(tmp_buf.data());
+    int fd_flags = fcntl(fd, F_GETFD);
+    if (fd_flags >= 0) fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC);
 
-    if (write(fd, json_content.data(), json_content.size()) !=
-            (ssize_t)json_content.size()) {
+    size_t written = 0;
+    while (written < json_content.size()) {
+        ssize_t n = write(fd, json_content.data() + written,
+                          json_content.size() - written);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            close(fd); unlink(tmp.c_str()); return false;
+        }
+        written += static_cast<size_t>(n);
+    }
+    if (fchmod(fd, 0644) != 0) {
         close(fd); unlink(tmp.c_str()); return false;
     }
     if (fsync(fd) != 0) { close(fd); unlink(tmp.c_str()); return false; }
@@ -298,6 +314,11 @@ std::vector<std::string> ManifestStore::list_manifest_ids() const {
 }
 
 bool ManifestStore::create_snapshot(const std::string &root, Snapshot &out) {
+    // Exclusive: a snapshot is a point-in-time mapping across every tracked
+    // file, so no versioning/restore may be halfway through while we collect
+    // the newest committed manifest for each path.
+    std::unique_lock<std::shared_mutex> store_lock(store_mutex_);
+
     out.id        = generate_uuid();
     out.root      = root;
     out.timestamp = time(nullptr);
@@ -333,11 +354,14 @@ static bool verify_file_hash(const std::string &path,
     if (fstat(fd, &st) != 0) { close(fd); error = "stat failed"; return false; }
 
     std::vector<uint8_t> data(static_cast<size_t>(st.st_size));
-    ssize_t n = data.empty() ? 0 : read(fd, data.data(), data.size());
-    close(fd);
-    if (n < 0 || static_cast<size_t>(n) != data.size()) {
-        error = "short read"; return false;
+    size_t got = 0;
+    while (got < data.size()) {
+        ssize_t n = read(fd, data.data() + got, data.size() - got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); error = "short read"; return false; }
+        got += static_cast<size_t>(n);
     }
+    close(fd);
 
     std::string actual = sha256_hex(data.data(), data.size());
     if (actual != expected_sha) { error = "hash mismatch"; return false; }
@@ -346,7 +370,36 @@ static bool verify_file_hash(const std::string &path,
 
 std::vector<std::string> ManifestStore::verify_all(
         const std::string &objects_root) const {
+    std::shared_lock<std::shared_mutex> store_lock(store_mutex_);
     std::vector<std::string> corrupt;
+
+    // Validate the history file's structure explicitly. The normal history
+    // accessors fail soft (returning an empty map) so one corrupt file does not
+    // take the daemon down, but verification must still report it.
+    if (access(history_path_.c_str(), F_OK) == 0) {
+        std::string raw;
+        bool history_ok = read_json_file(history_path_, raw);
+        if (history_ok) {
+            try {
+                json h = json::parse(raw);
+                if (!h.is_object()) history_ok = false;
+                else {
+                    for (auto it = h.begin(); it != h.end(); ++it) {
+                        if (!it.value().is_array()) { history_ok = false; break; }
+                        for (const auto &id : it.value()) {
+                            if (!id.is_string()) { history_ok = false; break; }
+                        }
+                        if (!history_ok) break;
+                    }
+                }
+            } catch (...) {
+                history_ok = false;
+            }
+        }
+        if (!history_ok)
+            corrupt.push_back("corrupt history JSON: meta/file_history.json");
+    }
+
     DIR *dir = opendir(manifests_dir_.c_str());
     if (!dir) return corrupt;
 
@@ -383,6 +436,22 @@ std::vector<std::string> ManifestStore::verify_all(
             if (!has_manifest(id))
                 corrupt.push_back(path + " (history references missing manifest " +
                                   id + ")");
+        }
+    }
+
+    // Snapshots are part of the durable state too: a JSON file that no longer
+    // parses, or a manifest reference that has disappeared, is corruption.
+    for (const auto &snap_id : list_snapshots()) {
+        Snapshot snap;
+        if (!read_snapshot(snap_id, snap)) {
+            corrupt.push_back("corrupt snapshot JSON: " + snap_id);
+            continue;
+        }
+        for (const auto &[path, manifest_id] : snap.files) {
+            (void)path;
+            if (!has_manifest(manifest_id))
+                corrupt.push_back("snapshot " + snap_id +
+                                  " references missing manifest " + manifest_id);
         }
     }
     return corrupt;

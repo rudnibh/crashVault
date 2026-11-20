@@ -48,10 +48,12 @@ public:
     explicit InotifyWatcher(const Config &cfg, RawEventCallback cb);
     ~InotifyWatcher();
 
-    // Add a root directory (and recurse into subdirectories)
+    // Add a root directory (and recurse into subdirectories).
+    // Call only before start(): the underlying watch maps are owned by the
+    // event-loop thread once it is running.
     void add_root(const std::string &path);
 
-    // Remove all watches for a root directory
+    // Remove all watches for a root directory. Same lifetime rule as add_root.
     void remove_root(const std::string &path);
 
     // Start the watcher thread (blocks internally via epoll_wait)
@@ -60,8 +62,9 @@ public:
     // Signal the watcher thread to stop and join it
     void stop();
 
-    // Returns the current count of active watches
-    size_t watch_count() const { return wd_to_path_.size(); }
+    // Returns the current count of active watches. Safe to call from IPC
+    // threads while the watcher event loop is running.
+    size_t watch_count() const { return watch_count_.load(); }
 
     // Returns true if the event queue overflowed since last call
     bool check_and_clear_overflow() {
@@ -108,6 +111,7 @@ private:
     std::thread                             thread_;
     std::atomic<bool>                       running_{false};
     std::atomic<bool>                       overflow_{false};
+    std::atomic<size_t>                     watch_count_{0};
     int                                     signal_pipe_fd_{-1}; // read end of self-pipe
 };
 

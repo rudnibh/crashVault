@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <ctime>
+#include <shared_mutex>
 
 namespace cv {
 
@@ -101,6 +102,14 @@ public:
     // Returns a human-readable list of corruption problems (empty = healthy).
     std::vector<std::string> verify_all(const std::string &objects_root) const;
 
+    // Store-wide reader/writer gate. Versioning, restore, snapshot creation and
+    // verification take a shared lock; GC takes an exclusive lock. This stops
+    // GC from deleting a chunk in the window between "chunk written" and
+    // "manifest committed", and stops it deleting data being restored.
+    std::shared_mutex &store_mutex() const { return store_mutex_; }
+
+    const std::string &store_root() const { return store_root_; }
+
 private:
     bool write_json_file(const std::string &path, const std::string &json) const;
     bool read_json_file(const std::string &path, std::string &out) const;
@@ -109,6 +118,7 @@ private:
     std::string manifests_dir_;
     std::string snapshots_dir_;
     std::string history_path_;
+    mutable std::shared_mutex store_mutex_;
 };
 
 // Generate a new UUID v4 string (8-4-4-4-12 hex format)

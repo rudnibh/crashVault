@@ -27,11 +27,13 @@ bool BoundedQueue::push(WorkItem item) {
         // Update existing entry — find it and refresh its priority
         for (auto &wi : queue_) {
             if (wi.path == item.path) {
-                wi.deleted  = item.deleted;
-                wi.priority = std::min(wi.priority, item.priority); // higher prio wins
+                wi.deleted         = item.deleted;
+                wi.priority        = std::min(wi.priority, item.priority); // higher prio wins
+                wi.enqueue_time_ms = item.enqueue_time_ms; // reset aging window
                 break;
             }
         }
+        maybe_sort();
         // No change to queue size — no need to notify consumers
         return true;
     }
@@ -44,8 +46,8 @@ bool BoundedQueue::push(WorkItem item) {
 
     if (shutdown_.load()) return false;
 
-    path_index_[item.path] = queue_.size();
     queue_.push_back(std::move(item));
+    path_index_[queue_.back().path] = queue_.size() - 1;
 
     maybe_sort();
 
@@ -76,11 +78,15 @@ bool BoundedQueue::pop(WorkItem &out) {
                 wi.priority = 0; // promote to highest priority
             }
         }
-        // Re-sort after aging
+        // Re-sort after aging and rebuild the path index so it never holds
+        // stale positions.
         std::stable_sort(queue_.begin(), queue_.end(),
             [](const WorkItem &a, const WorkItem &b) {
                 return a.priority < b.priority;
             });
+        path_index_.clear();
+        for (size_t i = 0; i < queue_.size(); i++)
+            path_index_[queue_[i].path] = i;
     }
 
     out = std::move(queue_.front());
